@@ -4,10 +4,11 @@ import * as lambda from '@aws-cdk/aws-lambda';
 import * as sns from '@aws-cdk/aws-sns';
 import * as sqs from '@aws-cdk/aws-sqs';
 import { App, CfnParameter, Duration, RemovalPolicy, Stack, Token } from '@aws-cdk/core';
+import * as cxapi from '@aws-cdk/cx-api';
 import * as subs from '../lib';
 
 /* eslint-disable quote-props */
-
+const restrictSqsDescryption = { [cxapi.SNS_SUBSCRIPTIONS_SQS_DECRYPTION_POLICY]: true };
 let stack: Stack;
 let topic: sns.Topic;
 
@@ -1042,14 +1043,164 @@ test('encrypted queue subscription', () => {
   });
 });
 
+describe('Restrict sqs decryption feature flag', () => {
+  test('Restrict decryption of sqs to sns service principal', () => {
+    const stackUnderTest = new Stack(
+      new App(),
+    );
+    const topicUnderTest = new sns.Topic(stackUnderTest, 'MyTopic', {
+      topicName: 'topicName',
+      displayName: 'displayName',
+    });
+    const key = new kms.Key(stackUnderTest, 'MyKey', {
+      removalPolicy: RemovalPolicy.DESTROY,
+    });
+
+    const queue = new sqs.Queue(stackUnderTest, 'MyQueue', {
+      encryptionMasterKey: key,
+    });
+
+    topicUnderTest.addSubscription(new subs.SqsSubscription(queue));
+
+    Template.fromStack(stackUnderTest).templateMatches({
+      'Resources': {
+        'MyKey6AB29FA6': {
+          'Type': 'AWS::KMS::Key',
+          'Properties': {
+            'KeyPolicy': {
+              'Statement': [
+                {
+                  'Action': 'kms:*',
+                  'Effect': 'Allow',
+                  'Principal': {
+                    'AWS': {
+                      'Fn::Join': [
+                        '',
+                        [
+                          'arn:',
+                          {
+                            'Ref': 'AWS::Partition',
+                          },
+                          ':iam::',
+                          {
+                            'Ref': 'AWS::AccountId',
+                          },
+                          ':root',
+                        ],
+                      ],
+                    },
+                  },
+                  'Resource': '*',
+                },
+                {
+                  'Action': [
+                    'kms:Decrypt',
+                    'kms:GenerateDataKey',
+                  ],
+                  'Effect': 'Allow',
+                  'Principal': {
+                    'Service': 'sns.amazonaws.com',
+                  },
+                  'Resource': '*',
+                },
+              ],
+              'Version': '2012-10-17',
+            },
+          },
+          'UpdateReplacePolicy': 'Delete',
+          'DeletionPolicy': 'Delete',
+        },
+      },
+    });
+  });
+  test('Restrict decryption of sqs to sns topic', () => {
+    const stackUnderTest = new Stack(
+      new App({
+        context: restrictSqsDescryption,
+      }),
+    );
+    const topicUnderTest = new sns.Topic(stackUnderTest, 'MyTopic', {
+      topicName: 'topicName',
+      displayName: 'displayName',
+    });
+    const key = new kms.Key(stackUnderTest, 'MyKey', {
+      removalPolicy: RemovalPolicy.DESTROY,
+    });
+
+    const queue = new sqs.Queue(stackUnderTest, 'MyQueue', {
+      encryptionMasterKey: key,
+    });
+
+    topicUnderTest.addSubscription(new subs.SqsSubscription(queue));
+
+    Template.fromStack(stackUnderTest).templateMatches({
+      'Resources': {
+        'MyKey6AB29FA6': {
+          'Type': 'AWS::KMS::Key',
+          'Properties': {
+            'KeyPolicy': {
+              'Statement': [
+                {
+                  'Action': 'kms:*',
+                  'Effect': 'Allow',
+                  'Principal': {
+                    'AWS': {
+                      'Fn::Join': [
+                        '',
+                        [
+                          'arn:',
+                          {
+                            'Ref': 'AWS::Partition',
+                          },
+                          ':iam::',
+                          {
+                            'Ref': 'AWS::AccountId',
+                          },
+                          ':root',
+                        ],
+                      ],
+                    },
+                  },
+                  'Resource': '*',
+                },
+                {
+                  'Action': [
+                    'kms:Decrypt',
+                    'kms:GenerateDataKey',
+                  ],
+                  'Effect': 'Allow',
+                  'Principal': {
+                    'Service': 'sns.amazonaws.com',
+                  },
+                  'Resource': '*',
+                  'Condition': {
+                    'ArnEquals': {
+                      'aws:SourceArn': {
+                        'Ref': 'MyTopic86869434',
+                      },
+                    },
+                  },
+                },
+              ],
+              'Version': '2012-10-17',
+            },
+          },
+          'UpdateReplacePolicy': 'Delete',
+          'DeletionPolicy': 'Delete',
+        },
+      },
+    });
+  });
+});
+
 test('lambda subscription', () => {
-  const fction = new lambda.Function(stack, 'MyFunc', {
+  const func = new lambda.Function(stack, 'MyFunc', {
     runtime: lambda.Runtime.NODEJS_14_X,
     handler: 'index.handler',
     code: lambda.Code.fromInline('exports.handler = function(e, c, cb) { return cb() }'),
   });
 
-  topic.addSubscription(new subs.LambdaSubscription(fction));
+  topic.addSubscription(new subs.LambdaSubscription(func));
 
   Template.fromStack(stack).templateMatches({
     'Resources': {
@@ -1154,13 +1305,13 @@ test('lambda subscription, cross region env agnostic', () => {
     topicName: 'topicName',
     displayName: 'displayName',
   });
-  const fction = new lambda.Function(lambdaStack, 'MyFunc', {
+  const func = new lambda.Function(lambdaStack, 'MyFunc', {
     runtime: lambda.Runtime.NODEJS_14_X,
     handler: 'index.handler',
     code: lambda.Code.fromInline('exports.handler = function(e, c, cb) { return cb() }'),
   });
 
-  topic1.addSubscription(new subs.LambdaSubscription(fction));
+  topic1.addSubscription(new subs.LambdaSubscription(func));
 
   Template.fromStack(lambdaStack).templateMatches({
     'Resources': {
@@ -1268,13 +1419,13 @@ test('lambda subscription, cross region', () => {
     topicName: 'topicName',
     displayName: 'displayName',
   });
-  const fction = new lambda.Function(lambdaStack, 'MyFunc', {
+  const func = new lambda.Function(lambdaStack, 'MyFunc', {
     runtime: lambda.Runtime.NODEJS_14_X,
     handler: 'index.handler',
     code: lambda.Code.fromInline('exports.handler = function(e, c, cb) { return cb() }'),
   });
 
-  topic1.addSubscription(new subs.LambdaSubscription(fction));
+  topic1.addSubscription(new subs.LambdaSubscription(func));
 
   Template.fromStack(lambdaStack).templateMatches({
     'Resources': {
@@ -1722,13 +1873,13 @@ test('throws with mutliple subscriptions of the same subscriber', () => {
 });
 
 test('with filter policy', () => {
-  const fction = new lambda.Function(stack, 'MyFunc', {
+  const func = new lambda.Function(stack, 'MyFunc', {
     runtime: lambda.Runtime.NODEJS_14_X,
     handler: 'index.handler',
     code: lambda.Code.fromInline('exports.handler = function(e, c, cb) { return cb() }'),
   });
 
-  topic.addSubscription(new subs.LambdaSubscription(fction, {
+  topic.addSubscription(new subs.LambdaSubscription(func, {
     filterPolicy: {
       color: sns.SubscriptionFilter.stringFilter({
         allowlist: ['red'],
@@ -1773,6 +1924,53 @@ test('with filter policy', () => {
         },
       ],
     },
+  });
+});
+
+test('with filter policy scope MessageBody', () => {
+  const func = new lambda.Function(stack, 'MyFunc', {
+    runtime: lambda.Runtime.NODEJS_14_X,
+    handler: 'index.handler',
+    code: lambda.Code.fromInline('exports.handler = function(e, c, cb) { return cb() }'),
+  });
+
+  topic.addSubscription(new subs.LambdaSubscription(func, {
+    filterPolicyWithMessageBody: {
+      color: sns.FilterOrPolicy.policy({
+        background: sns.FilterOrPolicy.filter(sns.SubscriptionFilter.stringFilter({
+          allowlist: ['red'],
+          matchPrefixes: ['bl', 'ye'],
+        })),
+      }),
+      size: sns.FilterOrPolicy.filter(sns.SubscriptionFilter.stringFilter({
+        denylist: ['small', 'medium'],
+      })),
+    },
+  }));
+
+  Template.fromStack(stack).hasResourceProperties('AWS::SNS::Subscription', {
+    'FilterPolicy': {
+      'color': {
+        'background': [
+          'red',
+          {
+            'prefix': 'bl',
+          },
+          {
+            'prefix': 'ye',
+          },
+        ],
+      },
+      'size': [
+        {
+          'anything-but': [
+            'small',
+            'medium',
+          ],
+        },
+      ],
+    },
+    FilterPolicyScope: 'MessageBody',
   });
 });
 

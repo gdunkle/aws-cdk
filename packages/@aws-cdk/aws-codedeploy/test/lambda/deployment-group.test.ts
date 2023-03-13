@@ -1,9 +1,11 @@
-import { Template } from '@aws-cdk/assertions';
+import { Match, Template } from '@aws-cdk/assertions';
 import * as cloudwatch from '@aws-cdk/aws-cloudwatch';
 import * as iam from '@aws-cdk/aws-iam';
 import * as lambda from '@aws-cdk/aws-lambda';
 import * as cdk from '@aws-cdk/core';
+import { Stack } from '@aws-cdk/core';
 import * as codedeploy from '../../lib';
+import { TrafficRouting } from '../../lib';
 
 function mockFunction(stack: cdk.Stack, id: string) {
   return new lambda.Function(stack, id, {
@@ -24,6 +26,7 @@ function mockAlias(stack: cdk.Stack) {
 describe('CodeDeploy Lambda DeploymentGroup', () => {
   test('can be created with default AllAtOnce IN_PLACE configuration', () => {
     const stack = new cdk.Stack();
+    stack.node.setContext('@aws-cdk/aws-codedeploy:removeAlarmsFromDeploymentGroup', true);
     const application = new codedeploy.LambdaApplication(stack, 'MyApp');
     const alias = mockAlias(stack);
     new codedeploy.LambdaDeploymentGroup(stack, 'MyDG', {
@@ -41,6 +44,10 @@ describe('CodeDeploy Lambda DeploymentGroup', () => {
           'MyDGServiceRole5E94FD88',
           'Arn',
         ],
+      },
+      AlarmConfiguration: {
+        Enabled: false,
+        Alarms: Match.absent(),
       },
       AutoRollbackConfiguration: {
         Enabled: true,
@@ -614,6 +621,37 @@ describe('CodeDeploy Lambda DeploymentGroup', () => {
       },
     });
   });
+
+  describe('deploymentGroup from ARN in different account and region', () => {
+    let stack: Stack;
+    let application: codedeploy.ILambdaApplication;
+    let group: codedeploy.ILambdaDeploymentGroup;
+
+    const account = '222222222222';
+    const region = 'theregion-1';
+
+    beforeEach(() => {
+      stack = new cdk.Stack(undefined, 'Stack', { env: { account: '111111111111', region: 'blabla-1' } });
+
+      application = codedeploy.LambdaApplication.fromLambdaApplicationArn(stack, 'Application', `arn:aws:codedeploy:${region}:${account}:application:MyApplication`);
+      group = codedeploy.LambdaDeploymentGroup.fromLambdaDeploymentGroupAttributes(stack, 'Group', {
+        application,
+        deploymentGroupName: 'DeploymentGroup',
+      });
+    });
+
+    test('knows its account and region', () => {
+      // THEN
+      expect(application.env).toEqual(expect.objectContaining({ account, region }));
+      expect(group.env).toEqual(expect.objectContaining({ account, region }));
+    });
+
+    test('references the predefined DeploymentGroupConfig in the right region', () => {
+      expect(group.deploymentConfig.deploymentConfigArn).toEqual(expect.stringContaining(
+        `:codedeploy:${region}:${account}:deploymentconfig:CodeDeployDefault.LambdaCanary10Percent5Minutes`,
+      ));
+    });
+  });
 });
 
 describe('imported with fromLambdaDeploymentGroupAttributes', () => {
@@ -626,6 +664,34 @@ describe('imported with fromLambdaDeploymentGroupAttributes', () => {
       deploymentGroupName: 'LambdaDeploymentGroup',
     });
 
-    expect(importedGroup.deploymentConfig).toEqual(codedeploy.LambdaDeploymentConfig.CANARY_10PERCENT_5MINUTES);
+    expect(importedGroup.deploymentConfig.deploymentConfigName).toEqual('CodeDeployDefault.LambdaCanary10Percent5Minutes');
+  });
+});
+
+test('dependency on the config exists to ensure ordering', () => {
+  // WHEN
+  const stack = new cdk.Stack();
+  const application = new codedeploy.LambdaApplication(stack, 'MyApp');
+  const alias = mockAlias(stack);
+  const config = new codedeploy.LambdaDeploymentConfig(stack, 'MyConfig', {
+    trafficRouting: TrafficRouting.timeBasedCanary({
+      interval: cdk.Duration.minutes(1),
+      percentage: 5,
+    }),
+  });
+  new codedeploy.LambdaDeploymentGroup(stack, 'MyDG', {
+    application,
+    alias,
+    deploymentConfig: config,
+  });
+
+  // THEN
+  Template.fromStack(stack).hasResource('AWS::CodeDeploy::DeploymentGroup', {
+    Properties: {
+      DeploymentConfigName: stack.resolve(config.deploymentConfigName),
+    },
+    DependsOn: [
+      stack.getLogicalId(config.node.defaultChild as codedeploy.CfnDeploymentConfig),
+    ],
   });
 });

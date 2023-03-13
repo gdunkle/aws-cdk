@@ -1,7 +1,8 @@
 import * as iam from '@aws-cdk/aws-iam';
 import * as sns from '@aws-cdk/aws-sns';
 import * as sqs from '@aws-cdk/aws-sqs';
-import { ArnFormat, Names, Stack, Token } from '@aws-cdk/core';
+import { ArnFormat, FeatureFlags, Names, Stack, Token } from '@aws-cdk/core';
+import * as cxapi from '@aws-cdk/cx-api';
 import { Construct } from 'constructs';
 import { SubscriptionProps } from './subscription';
 
@@ -39,14 +40,14 @@ export class SqsSubscription implements sns.ITopicSubscription {
 
     // add a statement to the queue resource policy which allows this topic
     // to send messages to the queue.
-    this.queue.addToResourcePolicy(new iam.PolicyStatement({
+    const queuePolicyDependable = this.queue.addToResourcePolicy(new iam.PolicyStatement({
       resources: [this.queue.queueArn],
       actions: ['sqs:SendMessage'],
       principals: [snsServicePrincipal],
       conditions: {
         ArnEquals: { 'aws:SourceArn': topic.topicArn },
       },
-    }));
+    })).policyDependable;
 
     // if the queue is encrypted, add a statement to the key resource policy
     // which allows this topic to decrypt KMS keys
@@ -55,6 +56,9 @@ export class SqsSubscription implements sns.ITopicSubscription {
         resources: ['*'],
         actions: ['kms:Decrypt', 'kms:GenerateDataKey'],
         principals: [snsServicePrincipal],
+        conditions: FeatureFlags.of(topic).isEnabled(cxapi.SNS_SUBSCRIPTIONS_SQS_DECRYPTION_POLICY)
+          ? { ArnEquals: { 'aws:SourceArn': topic.topicArn } }
+          : undefined,
       }));
     }
 
@@ -71,8 +75,10 @@ export class SqsSubscription implements sns.ITopicSubscription {
       protocol: sns.SubscriptionProtocol.SQS,
       rawMessageDelivery: this.props.rawMessageDelivery,
       filterPolicy: this.props.filterPolicy,
+      filterPolicyWithMessageBody: this.props.filterPolicyWithMessageBody,
       region: this.regionFromArn(topic),
       deadLetterQueue: this.props.deadLetterQueue,
+      subscriptionDependency: queuePolicyDependable,
     };
   }
 

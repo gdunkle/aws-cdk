@@ -9,6 +9,7 @@ import * as sqs from '@aws-cdk/aws-sqs';
 import { Annotations, ArnFormat, CfnResource, Duration, FeatureFlags, Fn, IAspect, Lazy, Names, Size, Stack, Token } from '@aws-cdk/core';
 import { LAMBDA_RECOGNIZE_LAYER_VERSION } from '@aws-cdk/cx-api';
 import { Construct, IConstruct } from 'constructs';
+import { AdotInstrumentationConfig } from './adot-layers';
 import { AliasOptions, Alias } from './alias';
 import { Architecture } from './architecture';
 import { Code, CodeConfig } from './code';
@@ -25,6 +26,7 @@ import { CfnFunction } from './lambda.generated';
 import { LayerVersion, ILayerVersion } from './layers';
 import { LogRetentionRetryOptions } from './log-retention';
 import { Runtime } from './runtime';
+import { RuntimeManagementMode } from './runtime-management';
 import { addAlias } from './util';
 
 /**
@@ -33,7 +35,7 @@ import { addAlias } from './util';
 export enum Tracing {
   /**
    * Lambda will respect any tracing header it receives from an upstream service.
-   * If no tracing header is received, Lambda will call X-Ray for a tracing decision.
+   * If no tracing header is received, Lambda will sample the request based on a fixed rate. Please see the [Using AWS Lambda with AWS X-Ray](https://docs.aws.amazon.com/lambda/latest/dg/services-xray.html) documentation for details on this sampling behavior.
    */
   ACTIVE = 'Active',
   /**
@@ -133,6 +135,7 @@ export interface FunctionOptions extends EventInvokeConfigOptions {
    * VPC network to place Lambda network interfaces
    *
    * Specify this if the Lambda function needs to access resources in a VPC.
+   * This is required when `vpcSubnets` is specified.
    *
    * @default - Function is not placed within a VPC.
    */
@@ -141,8 +144,11 @@ export interface FunctionOptions extends EventInvokeConfigOptions {
   /**
    * Where to place the network interfaces within the VPC.
    *
-   * Only used if 'vpc' is supplied. Note: internet access for Lambdas
-   * requires a NAT gateway, so picking Public subnets is not allowed.
+   * This requires `vpc` to be specified in order for interfaces to actually be
+   * placed in the subnets. If `vpc` is not specify, this will raise an error.
+   *
+   * Note: Internet access for Lambda Functions requires a NAT Gateway, so picking
+   * public subnets is not allowed (unless `allowPublicSubnet` is set to `true`).
    *
    * @default - the Vpc default strategy if not specified
    */
@@ -247,6 +253,14 @@ export interface FunctionOptions extends EventInvokeConfigOptions {
   readonly insightsVersion?: LambdaInsightsVersion;
 
   /**
+   * Specify the configuration of AWS Distro for OpenTelemetry (ADOT) instrumentation
+   * @see https://aws-otel.github.io/docs/getting-started/lambda
+   *
+   * @default - No ADOT instrumentation
+   */
+  readonly adotInstrumentation?: AdotInstrumentationConfig;
+
+  /**
    * A list of layers to add to the function's execution environment. You can configure your Lambda function to pull in
    * additional code during initialization in the form of layers. Layers are packages of libraries or other dependencies
    * that can be used by multiple functions.
@@ -346,6 +360,12 @@ export interface FunctionOptions extends EventInvokeConfigOptions {
    * @default Architecture.X86_64
    */
   readonly architecture?: Architecture;
+
+  /**
+   * Sets the runtime management configuration for a function's version.
+   * @default Auto
+   */
+  readonly runtimeManagementMode?: RuntimeManagementMode;
 }
 
 export interface FunctionProps extends FunctionOptions {
@@ -369,7 +389,7 @@ export interface FunctionProps extends FunctionOptions {
    * The name of the method within your code that Lambda calls to execute
    * your function. The format includes the file name. It can also include
    * namespaces and other qualifiers, depending on the runtime.
-   * For more information, see https://docs.aws.amazon.com/lambda/latest/dg/gettingstarted-features.html#gettingstarted-features-programmingmodel.
+   * For more information, see https://docs.aws.amazon.com/lambda/latest/dg/foundation-progmodel.html.
    *
    * Use `Handler.FROM_IMAGE` when defining a function from a Docker image.
    *
@@ -423,7 +443,7 @@ export class Function extends FunctionBase {
 
     cfn.overrideLogicalId(Lazy.uncachedString({
       produce: () => {
-        const hash = calculateFunctionHash(this);
+        const hash = calculateFunctionHash(this, this.hashMixins.join(''));
         const logicalId = trimFromStart(originalLogicalId, 255 - 32);
         return `${logicalId}${hash}`;
       },
@@ -651,6 +671,7 @@ export class Function extends FunctionBase {
   private _currentVersion?: Version;
 
   private _architecture?: Architecture;
+  private hashMixins = new Array<string>();
 
   constructor(scope: Construct, id: string, props: FunctionProps) {
     super(scope, id, {
@@ -790,7 +811,6 @@ export class Function extends FunctionBase {
       } : undefined,
       vpcConfig: this.configureVpc(props),
       deadLetterConfig: this.buildDeadLetterConfig(dlqTopicOrQueue),
-      tracingConfig: this.buildTracingConfig(props),
       reservedConcurrentExecutions: props.reservedConcurrentExecutions,
       imageConfig: undefinedIfNoKeys({
         command: code.image?.cmd,
@@ -801,7 +821,12 @@ export class Function extends FunctionBase {
       fileSystemConfigs,
       codeSigningConfigArn: props.codeSigningConfig?.codeSigningConfigArn,
       architectures: this._architecture ? [this._architecture.name] : undefined,
+      runtimeManagementConfig: props.runtimeManagementMode?.runtimeManagementConfig,
     });
+
+    if ((props.tracing !== undefined) || (props.adotInstrumentation !== undefined)) {
+      resource.tracingConfig = this.buildTracingConfig(props.tracing ?? Tracing.ACTIVE);
+    }
 
     resource.node.addDependency(this.role);
 
@@ -884,6 +909,8 @@ export class Function extends FunctionBase {
 
     // Configure Lambda insights
     this.configureLambdaInsights(props);
+
+    this.configureAdotInstrumentation(props);
   }
 
   /**
@@ -894,8 +921,57 @@ export class Function extends FunctionBase {
    * @param options Environment variable options.
    */
   public addEnvironment(key: string, value: string, options?: EnvironmentOptions): this {
+    // Reserved environment variables will fail during cloudformation deploy if they're set.
+    // This check is just to allow CDK to fail faster when these are specified.
+    const reservedEnvironmentVariables = [
+      '_HANDLER',
+      '_X_AMZN_TRACE_ID',
+      'AWS_REGION',
+      'AWS_EXECUTION_ENV',
+      'AWS_LAMBDA_FUNCTION_NAME',
+      'AWS_LAMBDA_FUNCTION_MEMORY_SIZE',
+      'AWS_LAMBDA_FUNCTION_VERSION',
+      'AWS_LAMBDA_INITIALIZATION_TYPE',
+      'AWS_LAMBDA_LOG_GROUP_NAME',
+      'AWS_LAMBDA_LOG_STREAM_NAME',
+      'AWS_ACCESS_KEY',
+      'AWS_ACCESS_KEY_ID',
+      'AWS_SECRET_ACCESS_KEY',
+      'AWS_SESSION_TOKEN',
+      'AWS_LAMBDA_RUNTIME_API',
+      'LAMBDA_TASK_ROOT',
+      'LAMBDA_RUNTIME_DIR',
+    ];
+    if (reservedEnvironmentVariables.includes(key)) {
+      throw new Error(`${key} environment variable is reserved by the lambda runtime and can not be set manually. See https://docs.aws.amazon.com/lambda/latest/dg/configuration-envvars.html`);
+    }
     this.environment[key] = { value, ...options };
     return this;
+  }
+
+  /**
+   * Mix additional information into the hash of the Version object
+   *
+   * The Lambda Function construct does its best to automatically create a new
+   * Version when anything about the Function changes (its code, its layers,
+   * any of the other properties).
+   *
+   * However, you can sometimes source information from places that the CDK cannot
+   * look into, like the deploy-time values of SSM parameters. In those cases,
+   * the CDK would not force the creation of a new Version object when it actually
+   * should.
+   *
+   * This method can be used to invalidate the current Version object. Pass in
+   * any string into this method, and make sure the string changes when you know
+   * a new Version needs to be created.
+   *
+   * This method may be called more than once.
+   */
+  public invalidateVersionBasedOn(x: string) {
+    if (Token.isUnresolved(x)) {
+      throw new Error('invalidateVersionOn: input may not contain unresolved tokens');
+    }
+    this.hashMixins.push(x);
   }
 
   /**
@@ -1048,6 +1124,31 @@ Environment variables can be marked for removal when used in Lambda@Edge by sett
     this.role?.addManagedPolicy(iam.ManagedPolicy.fromAwsManagedPolicyName('CloudWatchLambdaInsightsExecutionRolePolicy'));
   }
 
+  /**
+   * Add an AWS Distro for OpenTelemetry Lambda layer.
+   *
+   * @param props properties for the ADOT instrumentation
+   */
+  private configureAdotInstrumentation(props: FunctionProps): void {
+
+    if (props.adotInstrumentation === undefined) {
+      return;
+    }
+
+    if (props.runtime === Runtime.FROM_IMAGE) {
+      throw new Error("ADOT Lambda layer can't be configured with container image package type");
+    }
+
+    // This is not the complete list of incompatible runtimes and layer types. We are only
+    // checking for common mistakes on a best-effort basis.
+    if (this.runtime === Runtime.GO_1_X) {
+      throw new Error('Runtime go1.x is not supported by the ADOT Lambda Go SDK');
+    }
+
+    this.addLayers(LayerVersion.fromLayerVersionArn(this, 'AdotLayer', props.adotInstrumentation.layerVersion._bind(this).arn));
+    this.addEnvironment('AWS_LAMBDA_EXEC_WRAPPER', props.adotInstrumentation.execWrapper);
+  }
+
   private renderLayers() {
     if (!this._layers || this._layers.length === 0) {
       return undefined;
@@ -1094,7 +1195,13 @@ Environment variables can be marked for removal when used in Lambda@Edge by sett
       throw new Error('Cannot configure \'securityGroup\' or \'allowAllOutbound\' without configuring a VPC');
     }
 
-    if (!props.vpc) { return undefined; }
+    if (!props.vpc) {
+      if (props.vpcSubnets) {
+        throw new Error('Cannot configure \'vpcSubnets\' without configuring a VPC');
+      }
+      return undefined;
+    }
+
 
     if (props.securityGroup && props.allowAllOutbound !== undefined) {
       throw new Error('Configure \'allowAllOutbound\' directly on the supplied SecurityGroup.');
@@ -1126,21 +1233,22 @@ Environment variables can be marked for removal when used in Lambda@Edge by sett
     }
 
     const allowPublicSubnet = props.allowPublicSubnet ?? false;
-    const { subnetIds } = props.vpc.selectSubnets(props.vpcSubnets);
+    const selectedSubnets = props.vpc.selectSubnets(props.vpcSubnets);
     const publicSubnetIds = new Set(props.vpc.publicSubnets.map(s => s.subnetId));
-    for (const subnetId of subnetIds) {
+    for (const subnetId of selectedSubnets.subnetIds) {
       if (publicSubnetIds.has(subnetId) && !allowPublicSubnet) {
         throw new Error('Lambda Functions in a public subnet can NOT access the internet. ' +
           'If you are aware of this limitation and would still like to place the function in a public subnet, set `allowPublicSubnet` to true');
       }
     }
+    this.node.addDependency(selectedSubnets.internetConnectivityEstablished);
 
     // List can't be empty here, if we got this far you intended to put your Lambda
     // in subnets. We're going to guarantee that we get the nice error message by
     // making VpcNetwork do the selection again.
 
     return {
-      subnetIds,
+      subnetIds: selectedSubnets.subnetIds,
       securityGroupIds: securityGroups.map(sg => sg.securityGroupId),
     };
   }
@@ -1190,8 +1298,8 @@ Environment variables can be marked for removal when used in Lambda@Edge by sett
     }
   }
 
-  private buildTracingConfig(props: FunctionProps) {
-    if (props.tracing === undefined || props.tracing === Tracing.DISABLED) {
+  private buildTracingConfig(tracing: Tracing) {
+    if (tracing === undefined || tracing === Tracing.DISABLED) {
       return undefined;
     }
 
@@ -1201,7 +1309,7 @@ Environment variables can be marked for removal when used in Lambda@Edge by sett
     }));
 
     return {
-      mode: props.tracing,
+      mode: tracing,
     };
   }
 

@@ -1,15 +1,15 @@
 import * as cxschema from '@aws-cdk/cloud-assembly-schema';
-import { Duration, IResource, Resource, Lazy } from '@aws-cdk/core';
+import { Duration, Resource, Lazy } from '@aws-cdk/core';
 import { Construct } from 'constructs';
-import { BaseListener, BaseListenerLookupOptions } from '../shared/base-listener';
-import { HealthCheck } from '../shared/base-target-group';
-import { AlpnPolicy, Protocol, SslPolicy } from '../shared/enums';
-import { IListenerCertificate } from '../shared/listener-certificate';
-import { validateNetworkProtocol } from '../shared/util';
 import { NetworkListenerAction } from './network-listener-action';
 import { NetworkListenerCertificate } from './network-listener-certificate';
 import { INetworkLoadBalancer } from './network-load-balancer';
 import { INetworkLoadBalancerTarget, INetworkTargetGroup, NetworkTargetGroup } from './network-target-group';
+import { BaseListener, BaseListenerLookupOptions, IListener } from '../shared/base-listener';
+import { HealthCheck } from '../shared/base-target-group';
+import { AlpnPolicy, Protocol, SslPolicy } from '../shared/enums';
+import { IListenerCertificate } from '../shared/listener-certificate';
+import { validateNetworkProtocol } from '../shared/util';
 
 /**
  * Basic properties for a Network Listener
@@ -311,12 +311,7 @@ export class NetworkListener extends BaseListener implements INetworkListener {
 /**
  * Properties to reference an existing listener
  */
-export interface INetworkListener extends IResource {
-  /**
-   * ARN of the listener
-   * @attribute
-   */
-  readonly listenerArn: string;
+export interface INetworkListener extends IListener {
 }
 
 /**

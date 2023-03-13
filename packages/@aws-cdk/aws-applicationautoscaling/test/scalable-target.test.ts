@@ -2,8 +2,8 @@ import { Annotations, Match, Template } from '@aws-cdk/assertions';
 import * as cloudwatch from '@aws-cdk/aws-cloudwatch';
 import * as iam from '@aws-cdk/aws-iam';
 import * as cdk from '@aws-cdk/core';
-import * as appscaling from '../lib';
 import { createScalableTarget } from './util';
+import * as appscaling from '../lib';
 
 describe('scalable target', () => {
   test('test scalable target creation', () => {
@@ -184,6 +184,7 @@ describe('scalable target', () => {
     expect(appscaling.ServiceNamespace.RDS).toEqual('rds');
     expect(appscaling.ServiceNamespace.SAGEMAKER).toEqual('sagemaker');
     expect(appscaling.ServiceNamespace.ELASTICACHE).toEqual('elasticache');
+    expect(appscaling.ServiceNamespace.NEPTUNE).toEqual('neptune');
   });
 
   test('create scalable target with negative minCapacity throws error', () => {

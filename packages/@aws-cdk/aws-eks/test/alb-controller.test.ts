@@ -2,11 +2,10 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { Template } from '@aws-cdk/assertions';
 import * as iam from '@aws-cdk/aws-iam';
-import { Cluster, KubernetesVersion, AlbController, AlbControllerVersion, HelmChart } from '../lib';
 import { testFixture } from './util';
+import { Cluster, KubernetesVersion, AlbController, AlbControllerVersion, HelmChart } from '../lib';
 
 test('all vended policies are valid', () => {
-
   const addOnsDir = path.join(__dirname, '..', 'lib', 'addons');
 
   for (const addOn of fs.readdirSync(addOnsDir)) {
@@ -23,11 +22,9 @@ test('all vended policies are valid', () => {
       }
     }
   }
-
 });
 
 test('can configure a custom repository', () => {
-
   const { stack } = testFixture();
 
   const cluster = new Cluster(stack, 'Cluster', {
@@ -58,11 +55,9 @@ test('can configure a custom repository', () => {
       ],
     },
   });
-
 });
 
 test('throws when a policy is not defined for a custom version', () => {
-
   const { stack } = testFixture();
 
   const cluster = new Cluster(stack, 'Cluster', {
@@ -73,5 +68,4 @@ test('throws when a policy is not defined for a custom version', () => {
     cluster,
     version: AlbControllerVersion.of('custom'),
   })).toThrowError("'albControllerOptions.policy' is required when using a custom controller version");
-
 });

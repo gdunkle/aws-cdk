@@ -1,4 +1,5 @@
 import { App, RemovalPolicy, Stack } from '@aws-cdk/core';
+import { IntegTest } from '@aws-cdk/integ-tests';
 import { Bucket } from '../lib';
 
 const app = new App();
@@ -12,11 +13,14 @@ new Bucket(stack, 'MyBucket', {
       expirationDate: new Date('2019-10-01'),
     },
     {
-      objectSizeLessThan: 500,
+      expirationDate: new Date('2019-10-01'),
+      objectSizeLessThan: 600,
       objectSizeGreaterThan: 500,
     },
   ],
   removalPolicy: RemovalPolicy.DESTROY,
 });
 
-app.synth();
+new IntegTest(app, 'cdk-integ-lifecycle', {
+  testCases: [stack],
+});

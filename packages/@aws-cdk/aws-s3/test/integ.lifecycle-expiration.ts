@@ -1,4 +1,5 @@
 import { App, Duration, Stack } from '@aws-cdk/core';
+import { IntegTest } from '@aws-cdk/integ-tests';
 import { Bucket } from '../lib';
 
 const app = new App();
@@ -10,7 +11,8 @@ new Bucket(stack, 'MyBucket', {
     noncurrentVersionExpiration: Duration.days(30),
     noncurrentVersionsToRetain: 123,
   }],
-  versioned: true,
 });
 
-app.synth();
+new IntegTest(app, 'cdk-integ-lifecycle-expiration', {
+  testCases: [stack],
+});

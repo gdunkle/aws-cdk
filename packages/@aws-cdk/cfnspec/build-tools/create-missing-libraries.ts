@@ -88,6 +88,7 @@ async function main() {
       name: module.packageName,
       version,
       description,
+      private: true,
       main: 'lib/index.js',
       types: 'lib/index.d.ts',
       jsii: {
@@ -111,7 +112,7 @@ async function main() {
           python: {
             classifiers: [
               'Framework :: AWS CDK',
-              'Framework :: AWS CDK :: 1',
+              'Framework :: AWS CDK :: 2',
             ],
             distName: module.pythonDistName,
             module: module.pythonModuleName,
@@ -178,9 +179,11 @@ async function main() {
       },
       dependencies: {
         '@aws-cdk/core': version,
+        'constructs': '^10.0.0',
       },
       peerDependencies: {
         '@aws-cdk/core': version,
+        'constructs': '^10.0.0',
       },
       engines: {
         node: '>= 14.15.0',
@@ -294,7 +297,6 @@ async function main() {
 
     await addDependencyToMegaPackage(path.join('@aws-cdk', 'cloudformation-include'), module.packageName, version, ['dependencies', 'peerDependencies']);
     await addDependencyToMegaPackage('aws-cdk-lib', module.packageName, version, ['devDependencies']);
-    await addDependencyToMegaPackage('monocdk', module.packageName, version, ['devDependencies']);
   }
 }
 

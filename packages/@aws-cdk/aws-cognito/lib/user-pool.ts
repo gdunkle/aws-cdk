@@ -65,6 +65,25 @@ export interface AutoVerifiedAttrs {
 }
 
 /**
+ * Attributes that will be kept until the user verifies the changed attribute.
+ */
+export interface KeepOriginalAttrs {
+  /**
+   * Whether the email address of the user should remain the original value until the new email address is verified.
+   *
+   * @default - false
+   */
+  readonly email?: boolean;
+
+  /**
+   * Whether the phone number of the user should remain the original value until the new phone number is verified.
+   *
+   * @default - false
+   */
+  readonly phone?: boolean;
+}
+
+/**
  * Triggers for a user pool
  * @see https://docs.aws.amazon.com/cognito/latest/developerguide/cognito-user-identity-pools-working-with-aws-lambda-triggers.html
  */
@@ -478,6 +497,19 @@ export interface DeviceTracking {
 }
 
 /**
+ * The different ways in which a user pool's Advanced Security Mode can be configured.
+ * @see https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-cognito-userpool-userpooladdons.html#cfn-cognito-userpool-userpooladdons-advancedsecuritymode
+ */
+export enum AdvancedSecurityMode {
+  /** Enable advanced security mode */
+  ENFORCED = 'ENFORCED',
+  /** gather metrics on detected risks without taking action. Metrics are published to Amazon CloudWatch */
+  AUDIT = 'AUDIT',
+  /** Advanced security mode is disabled */
+  OFF = 'OFF'
+}
+
+/**
  * Props for the UserPool construct
  */
 export interface UserPoolProps {
@@ -560,6 +592,14 @@ export interface UserPoolProps {
    * If absent, no attributes will be auto-verified.
    */
   readonly autoVerify?: AutoVerifiedAttrs;
+
+  /**
+   * Attributes which Cognito will look to handle changes to the value of your users' email address and phone number attributes.
+   * EMAIL and PHONE are the only available options.
+   *
+   * @default - Nothing is kept.
+   */
+  readonly keepOriginal?: KeepOriginalAttrs;
 
   /**
    * The set of attributes that are required for every user in the user pool.
@@ -647,6 +687,13 @@ export interface UserPoolProps {
   readonly removalPolicy?: RemovalPolicy;
 
   /**
+   * Indicates whether the user pool should have deletion protection enabled.
+   *
+   * @default false
+   */
+  readonly deletionProtection?: boolean;
+
+  /**
    * Device tracking settings
    * @default - see defaults on each property of DeviceTracking.
    */
@@ -658,6 +705,12 @@ export interface UserPoolProps {
    * @default - no key ID configured
    */
   readonly customSenderKmsKey?: IKey;
+
+  /**
+   * The user pool's Advanced Security Mode
+   * @default - no value
+   */
+  readonly advancedSecurityMode?: AdvancedSecurityMode;
 }
 
 /**
@@ -900,6 +953,9 @@ export class UserPool extends UserPoolBase {
       emailVerificationSubject,
       smsVerificationMessage,
       verificationMessageTemplate,
+      userPoolAddOns: undefinedIfNoKeys({
+        advancedSecurityMode: props.advancedSecurityMode,
+      }),
       schema: this.schemaConfiguration(props),
       mfaConfiguration: props.mfa,
       enabledMfas: this.mfaConfiguration(props),
@@ -910,6 +966,8 @@ export class UserPool extends UserPoolBase {
       }),
       accountRecoverySetting: this.accountRecovery(props),
       deviceConfiguration: props.deviceTracking,
+      userAttributeUpdateSettings: this.configureUserAttributeChanges(props),
+      deletionProtection: defaultDeletionProtection(props.deletionProtection),
     });
     userPool.applyRemovalPolicy(props.removalPolicy);
 
@@ -952,6 +1010,7 @@ export class UserPool extends UserPoolBase {
     fn.addPermission(`${capitalize}Cognito`, {
       principal: new ServicePrincipal('cognito-idp.amazonaws.com'),
       sourceArn: Lazy.string({ produce: () => this.userPoolArn }),
+      scope: this,
     });
   }
 
@@ -1221,6 +1280,26 @@ export class UserPool extends UserPoolBase {
         throw new Error(`Unsupported AccountRecovery type - ${accountRecovery}`);
     }
   }
+
+  private configureUserAttributeChanges(props: UserPoolProps): CfnUserPool.UserAttributeUpdateSettingsProperty | undefined {
+    if (!props.keepOriginal) {
+      return undefined;
+    }
+
+    const attributesRequireVerificationBeforeUpdate: string[] = [];
+
+    if (props.keepOriginal.email) {
+      attributesRequireVerificationBeforeUpdate.push(StandardAttributeNames.email);
+    }
+
+    if (props.keepOriginal.phone) {
+      attributesRequireVerificationBeforeUpdate.push(StandardAttributeNames.phoneNumber);
+    }
+
+    return {
+      attributesRequireVerificationBeforeUpdate,
+    };
+  }
 }
 
 function undefinedIfNoKeys(struct: object): object | undefined {
@@ -1229,4 +1308,16 @@ function undefinedIfNoKeys(struct: object): object | undefined {
 }
 function encodePuny(input: string | undefined): string | undefined {
   return input !== undefined ? punycodeEncode(input) : input;
+}
+
+function defaultDeletionProtection(deletionProtection?: boolean): 'ACTIVE' | 'INACTIVE' | undefined {
+  if (deletionProtection === true) {
+    return 'ACTIVE';
+  }
+
+  if (deletionProtection === false) {
+    return 'INACTIVE';
+  }
+
+  return undefined;
 }

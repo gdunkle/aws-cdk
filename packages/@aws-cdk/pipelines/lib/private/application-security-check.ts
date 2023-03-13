@@ -5,6 +5,7 @@ import * as iam from '@aws-cdk/aws-iam';
 import * as lambda from '@aws-cdk/aws-lambda';
 import { Duration, Tags } from '@aws-cdk/core';
 import { Construct } from 'constructs';
+import { CDKP_DEFAULT_CODEBUILD_IMAGE } from './default-codebuild-image';
 
 /**
  * Properties for an ApplicationSecurityCheck
@@ -77,6 +78,7 @@ export class ApplicationSecurityCheck extends Construct {
       'aws lambda invoke' +
       ` --function-name ${this.preApproveLambda.functionName}` +
       ' --invocation-type Event' +
+      ' --cli-binary-format raw-in-base64-out' +
       ' --payload "$payload"' +
       ' lambda.out';
 
@@ -100,7 +102,7 @@ export class ApplicationSecurityCheck extends Construct {
 
     this.cdkDiffProject = new codebuild.Project(this, 'CDKSecurityCheck', {
       environment: {
-        buildImage: codebuild.LinuxBuildImage.STANDARD_5_0,
+        buildImage: CDKP_DEFAULT_CODEBUILD_IMAGE,
       },
       buildSpec: codebuild.BuildSpec.fromObject({
         version: 0.2,

@@ -3,8 +3,8 @@ import * as dynamodb from '@aws-cdk/aws-dynamodb';
 import * as lambda from '@aws-cdk/aws-lambda';
 import * as sqs from '@aws-cdk/aws-sqs';
 import * as cdk from '@aws-cdk/core';
-import * as sources from '../lib';
 import { TestFunction } from './test-function';
+import * as sources from '../lib';
 
 /* eslint-disable quote-props */
 
@@ -241,6 +241,57 @@ describe('DynamoEventSource', () => {
     }))).toThrow(/Maximum batch size must be between 1 and 10000 inclusive \(given 10001\)/);
 
 
+  });
+
+  test('adding filter criteria', () => {
+    // GIVEN
+    const stack = new cdk.Stack();
+    const fn = new TestFunction(stack, 'Fn');
+    const table = new dynamodb.Table(stack, 'T', {
+      partitionKey: {
+        name: 'id',
+        type: dynamodb.AttributeType.STRING,
+      },
+      stream: dynamodb.StreamViewType.NEW_IMAGE,
+    });
+
+    // WHEN
+    fn.addEventSource(new sources.DynamoEventSource(table, {
+      startingPosition: lambda.StartingPosition.LATEST,
+      filters: [
+        lambda.FilterCriteria.filter({
+          eventName: lambda.FilterRule.isEqual('INSERT'),
+          dynamodb: {
+            Keys: {
+              id: {
+                S: lambda.FilterRule.exists(),
+              },
+            },
+          },
+        }),
+      ],
+    }));
+
+    // THEN
+    Template.fromStack(stack).hasResourceProperties('AWS::Lambda::EventSourceMapping', {
+      'EventSourceArn': {
+        'Fn::GetAtt': [
+          'TD925BC7E',
+          'StreamArn',
+        ],
+      },
+      'FunctionName': {
+        'Ref': 'Fn9270CBC0',
+      },
+      'FilterCriteria': {
+        'Filters': [
+          {
+            'Pattern': '{"eventName":["INSERT"],"dynamodb":{"Keys":{"id":{"S":[{"exists":true}]}}}}',
+          },
+        ],
+      },
+      'StartingPosition': 'LATEST',
+    });
   });
 
   test('specific maxBatchingWindow', () => {

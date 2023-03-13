@@ -108,7 +108,7 @@ describe('DatabaseCluster', () => {
         vpc,
         instanceType: ec2.InstanceType.of(ec2.InstanceClass.R5, ec2.InstanceSize.LARGE),
         vpcSubnets: {
-          subnetType: ec2.SubnetType.PRIVATE_WITH_NAT,
+          subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS,
         },
       });
     }).toThrowError('Cluster requires at least 2 subnets, got 1');
@@ -703,6 +703,29 @@ describe('DatabaseCluster', () => {
       },
       LogGroupName: { 'Fn::Join': ['', ['/aws/docdb/', { Ref: 'DatabaseB269D8BB' }, '/profiler']] },
       RetentionInDays: 90,
+    });
+  });
+
+  test('can enable Performance Insights on instances', () => {
+    // GIVEN
+    const stack = testStack();
+    const vpc = new ec2.Vpc(stack, 'VPC');
+
+    // WHEN
+    new DatabaseCluster(stack, 'Database', {
+      masterUser: {
+        username: 'admin',
+      },
+      instanceType: ec2.InstanceType.of(ec2.InstanceClass.BURSTABLE2, ec2.InstanceSize.SMALL),
+      vpc,
+      enablePerformanceInsights: true,
+    });
+
+    // THEN
+    Template.fromStack(stack).hasResource('AWS::DocDB::DBInstance', {
+      Properties: {
+        EnablePerformanceInsights: true,
+      },
     });
   });
 

@@ -1,12 +1,12 @@
 import * as cxapi from '@aws-cdk/cx-api';
 import { Construct } from 'constructs';
+import { toCloudFormation } from './util';
 import {
   App, App as Root, CfnCondition,
   CfnDeletionPolicy, CfnResource,
   Fn, IResource, RemovalPolicy, Resource, Stack,
 } from '../lib';
 import { synthesize } from '../lib/private/synthesis';
-import { toCloudFormation } from './util';
 
 describe('resource', () => {
   test('all resources derive from Resource, which derives from Entity', () => {
@@ -151,11 +151,11 @@ describe('resource', () => {
     const dependent = new CfnResource(stack, 'Dependent', { type: 'R' });
 
     // WHEN
-    dependent.addDependsOn(r1);
-    dependent.addDependsOn(r1);
-    dependent.addDependsOn(r1);
-    dependent.addDependsOn(r1);
-    dependent.addDependsOn(r1);
+    dependent.addDependency(r1);
+    dependent.addDependency(r1);
+    dependent.addDependency(r1);
+    dependent.addDependency(r1);
+    dependent.addDependency(r1);
 
     // THEN
     expect(toCloudFormation(stack)).toEqual({
@@ -192,7 +192,10 @@ describe('resource', () => {
     const stack = new Stack();
     const r1 = new CfnResource(stack, 'Resource', { type: 'Type' });
 
-    r1.cfnOptions.creationPolicy = { autoScalingCreationPolicy: { minSuccessfulInstancesPercent: 10 } };
+    r1.cfnOptions.creationPolicy = {
+      autoScalingCreationPolicy: { minSuccessfulInstancesPercent: 10 },
+      startFleet: true,
+    };
     // eslint-disable-next-line max-len
     r1.cfnOptions.updatePolicy = {
       autoScalingScheduledAction: { ignoreUnmodifiedGroupSizeProperties: false },
@@ -210,7 +213,10 @@ describe('resource', () => {
       Resources: {
         Resource: {
           Type: 'Type',
-          CreationPolicy: { AutoScalingCreationPolicy: { MinSuccessfulInstancesPercent: 10 } },
+          CreationPolicy: {
+            AutoScalingCreationPolicy: { MinSuccessfulInstancesPercent: 10 },
+            StartFleet: true,
+          },
           UpdatePolicy: {
             AutoScalingScheduledAction: { IgnoreUnmodifiedGroupSizeProperties: false },
             AutoScalingReplacingUpdate: { WillReplace: true },
@@ -726,6 +732,59 @@ describe('resource', () => {
       });
     });
 
+    test('Can override a an object with an intrinsic', () => {
+      // GIVEN
+      const stack = new Stack();
+
+      const condition = new CfnCondition(stack, 'MyCondition', {
+        expression: Fn.conditionEquals('us-east-1', 'us-east-1'),
+      });
+      const resource = new CfnResource(stack, 'MyResource', {
+        type: 'MyResourceType',
+        properties: {
+          prop1: {
+            subprop: {
+              name: Fn.getAtt('resource', 'abc'),
+            },
+          },
+        },
+      });
+      const isEnabled = Fn.conditionIf(condition.logicalId, {
+        Ref: 'AWS::NoValue',
+      }, {
+        name: Fn.getAtt('resource', 'abc'),
+      });
+
+      // WHEN
+      resource.addPropertyOverride('prop1.subprop', isEnabled);
+      const cfn = toCloudFormation(stack);
+
+      // THEN
+      expect(cfn.Resources.MyResource).toEqual({
+        Type: 'MyResourceType',
+        Properties: {
+          prop1: {
+            subprop: {
+              'Fn::If': [
+                'MyCondition',
+                {
+                  Ref: 'AWS::NoValue',
+                },
+                {
+                  name: {
+                    'Fn::GetAtt': [
+                      'resource',
+                      'abc',
+                    ],
+                  },
+                },
+              ],
+            },
+          },
+        },
+      });
+    });
+
     test('overrides allow overriding a nested intrinsic', () => {
       // GIVEN
       const stack = new Stack();
@@ -948,7 +1007,7 @@ class CustomizableResource extends CfnResource {
   }
 
   public renderProperties(): { [key: string]: any } {
-    const props = this.updatedProperites;
+    const props = this.updatedProperties;
     const render: { [key: string]: any } = {};
     for (const key of Object.keys(props)) {
       render[key.toUpperCase()] = props[key];
@@ -956,7 +1015,7 @@ class CustomizableResource extends CfnResource {
     return render;
   }
 
-  protected get updatedProperites(): { [key: string]: any } {
+  protected get updatedProperties(): { [key: string]: any } {
     const props: { [key: string]: any } = {
       prop1: this.prop1,
       prop2: this.prop2,

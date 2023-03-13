@@ -6,14 +6,13 @@ import * as ec2 from '@aws-cdk/aws-ec2';
 import * as iam from '@aws-cdk/aws-iam';
 import * as logs from '@aws-cdk/aws-logs';
 import * as s3 from '@aws-cdk/aws-s3';
-import { testDeprecated, testFutureBehavior } from '@aws-cdk/cdk-build-tools';
+import * as sns from '@aws-cdk/aws-sns';
+import { testDeprecated } from '@aws-cdk/cdk-build-tools';
 import * as cdk from '@aws-cdk/core';
 import * as cxapi from '@aws-cdk/cx-api';
 import * as s3deploy from '../lib';
 
 /* eslint-disable max-len */
-
-const s3GrantWriteCtx = { [cxapi.S3_GRANT_WRITE_WITHOUT_ACL]: true };
 
 test('deploy from local directory asset', () => {
   // GIVEN
@@ -616,9 +615,9 @@ test('fails if distribution paths don\'t start with "/"', () => {
   })).toThrow(/Distribution paths must start with "\/"/);
 });
 
-testFutureBehavior('lambda execution role gets permissions to read from the source bucket and read/write in destination', s3GrantWriteCtx, cdk.App, (app) => {
+test('lambda execution role gets permissions to read from the source bucket and read/write in destination', () => {
   // GIVEN
-  const stack = new cdk.Stack(app);
+  const stack = new cdk.Stack();
   const source = new s3.Bucket(stack, 'Source');
   const bucket = new s3.Bucket(stack, 'Dest');
 
@@ -711,9 +710,9 @@ testFutureBehavior('lambda execution role gets permissions to read from the sour
   });
 });
 
-testFutureBehavior('lambda execution role gets putObjectAcl permission when deploying with accessControl', s3GrantWriteCtx, cdk.App, (app) => {
+test('lambda execution role gets putObjectAcl permission when deploying with accessControl', () => {
   // GIVEN
-  const stack = new cdk.Stack(app);
+  const stack = new cdk.Stack();
   const source = new s3.Bucket(stack, 'Source');
   const bucket = new s3.Bucket(stack, 'Dest');
 
@@ -945,6 +944,71 @@ test('deploy with multiple exclude and include filters', () => {
   });
 });
 
+test('deploy without extracting files in destination', () => {
+  // GIVEN
+  const stack = new cdk.Stack();
+  const bucket = new s3.Bucket(stack, 'Dest');
+
+  // WHEN
+  new s3deploy.BucketDeployment(stack, 'Deploy', {
+    sources: [s3deploy.Source.asset(path.join(__dirname, 'my-website.zip'))],
+    destinationBucket: bucket,
+    extract: false,
+  });
+
+  // THEN
+  Template.fromStack(stack).hasResourceProperties('Custom::CDKBucketDeployment', {
+    Extract: false,
+  });
+});
+
+test('deploy without extracting files in destination and get the object key', () => {
+  // GIVEN
+  const stack = new cdk.Stack();
+  const bucket = new s3.Bucket(stack, 'Dest');
+
+  // WHEN
+  const deployment = new s3deploy.BucketDeployment(stack, 'Deploy', {
+    sources: [s3deploy.Source.asset(path.join(__dirname, 'my-website.zip'))],
+    destinationBucket: bucket,
+    extract: false,
+  });
+
+  // Tests object key retrieval.
+  void(cdk.Fn.select(0, deployment.objectKeys));
+
+  // THEN
+  Template.fromStack(stack).hasResourceProperties('Custom::CDKBucketDeployment', {
+    Extract: false,
+  });
+});
+
+test('given a source with markers and extract is false, BucketDeployment throws an error', () => {
+  // GIVEN
+  const stack = new cdk.Stack();
+  const bucket = new s3.Bucket(stack, 'Dest');
+  const topic: sns.Topic = new sns.Topic(stack, 'SomeTopic1', {});
+
+  // WHEN
+  const file = s3deploy.Source.jsonData('MyJsonObject', {
+    'config.json': {
+      Foo: {
+        Bar: topic.topicArn, // marker
+      },
+    },
+  });
+  new s3deploy.BucketDeployment(stack, 'Deploy', {
+    sources: [file],
+    destinationBucket: bucket,
+    extract: false,
+  });
+
+  // THEN
+  expect(() => {
+    Template.fromStack(stack);
+  }).toThrow('Some sources are incompatible with extract=false; sources with deploy-time values (such as \'snsTopic.topicArn\') must be extracted.');
+});
+
 test('deployment allows vpc to be implicitly supplied to lambda', () => {
 
   // GIVEN
@@ -1045,6 +1109,32 @@ test('s3 deployment bucket is identical to destination bucket', () => {
     // before deploying other resources that rely call the destination bucket.
     DestinationBucketArn: { 'Fn::GetAtt': ['DestC383B82A', 'Arn'] },
   });
+});
+
+test('s3 deployed bucket in a different region has correct website url', () => {
+  // GIVEN
+  const stack = new cdk.Stack(undefined, undefined, {
+    env: {
+      region: 'us-east-1',
+    },
+  });
+  const bucket = s3.Bucket.fromBucketAttributes(stack, 'Dest', {
+    bucketName: 'my-bucket',
+    // Bucket is in a different region than stack
+    region: 'eu-central-1',
+  });
+
+  // WHEN
+  const bd = new s3deploy.BucketDeployment(stack, 'Deployment', {
+    destinationBucket: bucket,
+    sources: [s3deploy.Source.asset(path.join(__dirname, 'my-website'))],
+  });
+  const websiteUrl = stack.resolve(bd.deployedBucket.bucketWebsiteUrl);
+
+  // THEN
+  // eu-central-1 uses website endpoint format with a `.`
+  // see https://docs.aws.amazon.com/general/latest/gr/s3.html#s3_website_region_endpoints
+  expect(JSON.stringify(websiteUrl)).toContain('.s3-website.eu-central-1.');
 });
 
 test('using deployment bucket references the destination bucket by means of the CustomResource', () => {
@@ -1149,6 +1239,28 @@ test('throws if destinationKeyPrefix is too long', () => {
     destinationKeyPrefix: '/this/is/a/random/key/prefix/that/is/a/lot/of/characters/do/we/think/that/it/will/ever/be/this/long??????',
     memoryLimit: 256,
   })).toThrow(/The BucketDeployment construct requires that/);
+
+});
+
+test('skips destinationKeyPrefix validation if token', () => {
+
+  // GIVEN
+  const stack = new cdk.Stack();
+  const bucket = new s3.Bucket(stack, 'Dest');
+
+  // WHEN
+  // trick the cdk into creating a very long token
+  const prefixToken = cdk.Token.asString(5, { displayHint: 'longlonglonglonglonglonglonglonglonglonglonglonglonglonglonglonglonglonglonglonglonglonglonglonglonglonglonglonglonglonglonglong' });
+  new s3deploy.BucketDeployment(stack, 'DeployWithVpc2', {
+    sources: [s3deploy.Source.asset(path.join(__dirname, 'my-website'))],
+    destinationBucket: bucket,
+    destinationKeyPrefix: prefixToken,
+    memoryLimit: 256,
+  });
+
+  Template.fromStack(stack).hasResourceProperties('Custom::CDKBucketDeployment', {
+    DestinationBucketKeyPrefix: 5,
+  });
 
 });
 
@@ -1275,6 +1387,49 @@ test('Source.jsonData() can be used to create a file with a JSON object', () => 
   });
 });
 
+test('can add sources with addSource', () => {
+  const app = new cdk.App();
+  const stack = new cdk.Stack(app, 'Test');
+  const bucket = new s3.Bucket(stack, 'Bucket');
+  const deployment = new s3deploy.BucketDeployment(stack, 'Deploy', {
+    sources: [s3deploy.Source.data('my/path.txt', 'helloWorld')],
+    destinationBucket: bucket,
+  });
+  deployment.addSource(s3deploy.Source.data('my/other/path.txt', 'hello world'));
+
+  const result = app.synth();
+  const content = readDataFile(result, 'my/path.txt');
+  const content2 = readDataFile(result, 'my/other/path.txt');
+  expect(content).toStrictEqual('helloWorld');
+  expect(content2).toStrictEqual('hello world');
+  Template.fromStack(stack).hasResourceProperties('Custom::CDKBucketDeployment', {
+    SourceMarkers: [
+      {},
+      {},
+    ],
+  });
+});
+
+test('if any source has markers then all sources have markers', () => {
+  const app = new cdk.App();
+  const stack = new cdk.Stack(app, 'Test');
+  const bucket = new s3.Bucket(stack, 'Bucket');
+  const deployment = new s3deploy.BucketDeployment(stack, 'Deploy', {
+    sources: [s3deploy.Source.data('my/path.txt', 'helloWorld')],
+    destinationBucket: bucket,
+  });
+  deployment.addSource(s3deploy.Source.asset(path.join(__dirname, 'my-website')));
+
+  const result = app.synth();
+  const content = readDataFile(result, 'my/path.txt');
+  expect(content).toStrictEqual('helloWorld');
+  Template.fromStack(stack).hasResourceProperties('Custom::CDKBucketDeployment', {
+    SourceMarkers: [
+      {},
+      {},
+    ],
+  });
+});
 
 function readDataFile(casm: cxapi.CloudAssembly, relativePath: string): string {
   const assetDirs = readdirSync(casm.directory).filter(f => f.startsWith('asset.'));

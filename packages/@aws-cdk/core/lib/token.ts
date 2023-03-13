@@ -9,7 +9,7 @@ import { TokenizedStringFragments } from './string-fragments';
 
 /**
  * An enum-like class that represents the result of comparing two Tokens.
- * The return type of {@link Token.compareStrings}.
+ * The return type of `Token.compareStrings`.
  */
 export class TokenComparison {
   /**
@@ -229,6 +229,27 @@ export class Tokenization {
   }
 
   private constructor() {
+  }
+}
+
+/**
+ * An object which serializes to the JSON `null` literal, and which can safely
+ * be passed across languages where `undefined` and `null` are not different.
+ */
+export class JsonNull {
+  /** The canonical instance of `JsonNull`. */
+  public static readonly INSTANCE = new JsonNull();
+
+  private constructor() { }
+
+  /** Obtains the JSON representation of this object (`null`) */
+  public toJSON(): any {
+    return null;
+  }
+
+  /** Obtains the string representation of this object (`'null'`) */
+  public toString(): string {
+    return 'null';
   }
 }
 

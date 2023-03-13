@@ -195,7 +195,7 @@ describe('When Application Load Balancer', () => {
       PropagateTags: 'SERVICE',
       ServiceName: 'myService',
       PlacementConstraints: [{ Type: 'memberOf', Expression: 'attribute:ecs.instance-type =~ m5a.*' }],
-      PlacementStrategies: [{ Field: 'instanceId', Type: 'spread' }, { Field: 'cpu', Type: 'binpack' }, { Type: 'random' }],
+      PlacementStrategies: [{ Field: 'instanceId', Type: 'spread' }, { Field: 'CPU', Type: 'binpack' }, { Type: 'random' }],
     });
 
     Template.fromStack(stack).hasResourceProperties('AWS::ECS::TaskDefinition', {
@@ -1054,9 +1054,9 @@ describe('When Network Load Balancer', () => {
     });
 
     // THEN
-    expect(() => Template.fromStack(stack).hasResourceProperties('AWS::ECS::Service', {
-      EnableExecuteCommand: true,
-    })).toThrow('Expected true but received false at /Properties/EnableExecuteCommand (using objectLike matcher)');
+    Template.fromStack(stack).hasResourceProperties('AWS::ECS::Service', {
+      EnableExecuteCommand: false,
+    });
   });
 
   test('test ECS NLB construct with all settings', () => {
@@ -1173,7 +1173,7 @@ describe('When Network Load Balancer', () => {
       SchedulingStrategy: 'REPLICA',
       ServiceName: 'myService',
       PlacementConstraints: [{ Type: 'memberOf', Expression: 'attribute:ecs.instance-type =~ m5a.*' }],
-      PlacementStrategies: [{ Field: 'instanceId', Type: 'spread' }, { Field: 'cpu', Type: 'binpack' }, { Type: 'random' }],
+      PlacementStrategies: [{ Field: 'instanceId', Type: 'spread' }, { Field: 'CPU', Type: 'binpack' }, { Type: 'random' }],
     });
 
     Template.fromStack(stack).hasResourceProperties('AWS::ECS::TaskDefinition', {

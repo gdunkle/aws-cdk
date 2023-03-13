@@ -80,6 +80,8 @@ export interface CommonAutoScalingGroupProps {
   /**
    * Name of SSH keypair to grant access to instances
    *
+   * `launchTemplate` and `mixedInstancesPolicy` must not be specified when this property is specified
+   *
    * @default - No SSH access will be possible.
    */
   readonly keyName?: string;
@@ -119,10 +121,10 @@ export interface CommonAutoScalingGroupProps {
    * This is applied when any of the settings on the ASG are changed that
    * affect how the instances should be created (VPC, instance type, startup
    * scripts, etc.). It indicates how the existing instances should be
-   * replaced with new instances matching the new config. By default, nothing
-   * is done and only new instances are launched with the new config.
+   * replaced with new instances matching the new config. By default,
+   * `updatePolicy` takes precedence over `updateType`.
    *
-   * @default UpdateType.None
+   * @default UpdateType.REPLACING_UPDATE, unless updatePolicy has been set
    * @deprecated Use `updatePolicy` instead
    */
   readonly updateType?: UpdateType;
@@ -190,6 +192,8 @@ export interface CommonAutoScalingGroupProps {
    * Whether instances in the Auto Scaling Group should have public
    * IP addresses associated with them.
    *
+   * `launchTemplate` and `mixedInstancesPolicy` must not be specified when this property is specified
+   *
    * @default - Use subnet setting.
    */
   readonly associatePublicIpAddress?: boolean;
@@ -197,6 +201,8 @@ export interface CommonAutoScalingGroupProps {
   /**
    * The maximum hourly price (in USD) to be paid for any Spot Instance launched to fulfill the request. Spot Instances are
    * launched when the price you specify exceeds the current Spot market price.
+   *
+   * `launchTemplate` and `mixedInstancesPolicy` must not be specified when this property is specified
    *
    * @default none
    */
@@ -216,6 +222,8 @@ export interface CommonAutoScalingGroupProps {
    * either an Amazon EBS volume or an instance store volume.
    * You can use block device mappings to specify additional EBS volumes or
    * instance store volumes to attach to an instance when it is launched.
+   *
+   * `launchTemplate` and `mixedInstancesPolicy` must not be specified when this property is specified
    *
    * @see https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/block-device-mapping-concepts.html
    *
@@ -242,6 +250,8 @@ export interface CommonAutoScalingGroupProps {
    *
    * When detailed monitoring is enabled, Amazon CloudWatch generates metrics every minute and your account
    * is charged a fee. When you disable detailed monitoring, CloudWatch generates metrics every 5 minutes.
+   *
+   * `launchTemplate` and `mixedInstancesPolicy` must not be specified when this property is specified
    *
    * @see https://docs.aws.amazon.com/autoscaling/latest/userguide/as-instance-monitoring.html#enable-as-instance-metrics
    *
@@ -326,6 +336,35 @@ export interface CommonAutoScalingGroupProps {
    * @default - `TerminationPolicy.DEFAULT`
    */
   readonly terminationPolicies?: TerminationPolicy[];
+
+  /**
+   * The amount of time, in seconds, until a newly launched instance can contribute to the Amazon CloudWatch metrics.
+   * This delay lets an instance finish initializing before Amazon EC2 Auto Scaling aggregates instance metrics,
+   * resulting in more reliable usage data. Set this value equal to the amount of time that it takes for resource
+   * consumption to become stable after an instance reaches the InService state.
+   *
+   * To optimize the performance of scaling policies that scale continuously, such as target tracking and
+   * step scaling policies, we strongly recommend that you enable the default instance warmup, even if its value is set to 0 seconds
+   *
+   * Default instance warmup will not be added if no value is specified
+   *
+   * @see https://docs.aws.amazon.com/autoscaling/ec2/userguide/ec2-auto-scaling-default-instance-warmup.html
+   *
+   * @default None
+   */
+  readonly defaultInstanceWarmup?: Duration;
+
+  /**
+   * Indicates whether Capacity Rebalancing is enabled. When you turn on Capacity Rebalancing, Amazon EC2 Auto Scaling
+   * attempts to launch a Spot Instance whenever Amazon EC2 notifies that a Spot Instance is at an elevated risk of
+   * interruption. After launching a new instance, it then terminates an old instance.
+   *
+   * @see https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-as-group.html#cfn-as-group-capacityrebalance
+   *
+   * @default false
+   *
+   */
+  readonly capacityRebalance?: boolean;
 }
 
 /**
@@ -398,6 +437,13 @@ export enum SpotAllocationStrategy {
    * honors the instance type priorities on a best-effort basis but optimizes for capacity first.
    */
   CAPACITY_OPTIMIZED_PRIORITIZED = 'capacity-optimized-prioritized',
+
+  /**
+   * The price and capacity optimized allocation strategy looks at both price and
+   * capacity to select the Spot Instance pools that are the least likely to be
+   * interrupted and have the lowest possible price.
+   */
+  PRICE_CAPACITY_OPTIMIZED = 'price-capacity-optimized',
 }
 
 /**
@@ -543,7 +589,7 @@ export interface AutoScalingGroupProps extends CommonAutoScalingGroupProps {
   /**
    * Type of instance to launch
    *
-   * `launchTemplate` must not be specified when this property is specified.
+   * `launchTemplate` and `mixedInstancesPolicy` must not be specified when this property is specified
    *
    * @default - Do not provide any instance type
    */
@@ -552,7 +598,7 @@ export interface AutoScalingGroupProps extends CommonAutoScalingGroupProps {
   /**
    * AMI to launch
    *
-   * `launchTemplate` must not be specified when this property is specified.
+   * `launchTemplate` and `mixedInstancesPolicy` must not be specified when this property is specified
    *
    * @default - Do not provide any machine image
    */
@@ -561,7 +607,7 @@ export interface AutoScalingGroupProps extends CommonAutoScalingGroupProps {
   /**
    * Security group to launch the instances in.
    *
-   * `launchTemplate` must not be specified when this property is specified.
+   * `launchTemplate` and `mixedInstancesPolicy` must not be specified when this property is specified
    *
    * @default - A SecurityGroup will be created if none is specified.
    */
@@ -572,7 +618,7 @@ export interface AutoScalingGroupProps extends CommonAutoScalingGroupProps {
    *
    * The UserData may still be mutated after creation.
    *
-   * `launchTemplate` must not be specified when this property is specified.
+   * `launchTemplate` and `mixedInstancesPolicy` must not be specified when this property is specified
    *
    * @default - A UserData object appropriate for the MachineImage's
    * Operating System is created.
@@ -584,7 +630,7 @@ export interface AutoScalingGroupProps extends CommonAutoScalingGroupProps {
    *
    * The role must be assumable by the service principal `ec2.amazonaws.com`:
    *
-   * `launchTemplate` must not be specified when this property is specified.
+   * `launchTemplate` and `mixedInstancesPolicy` must not be specified when this property is specified
    *
    * @example
    *
@@ -951,6 +997,7 @@ abstract class AutoScalingGroupBase extends Resource implements IAutoScalingGrou
   public abstract readonly osType: ec2.OperatingSystemType;
   protected albTargetGroup?: elbv2.ApplicationTargetGroup;
   public readonly grantPrincipal: iam.IPrincipal = new iam.UnknownPrincipal({ resource: this });
+  protected hasCalledScaleOnRequestCount: boolean = false;
 
   /**
    * Send a message to either an SQS queue or SNS topic when instances launch or terminate
@@ -1054,6 +1101,7 @@ abstract class AutoScalingGroupBase extends Resource implements IAutoScalingGrou
     });
 
     policy.node.addDependency(this.albTargetGroup.loadBalancerAttached);
+    this.hasCalledScaleOnRequestCount = true;
     return policy;
   }
 
@@ -1327,6 +1375,8 @@ export class AutoScalingGroup extends AutoScalingGroupBase implements
       maxInstanceLifetime: this.maxInstanceLifetime ? this.maxInstanceLifetime.toSeconds() : undefined,
       newInstancesProtectedFromScaleIn: Lazy.any({ produce: () => this.newInstancesProtectedFromScaleIn }),
       terminationPolicies: props.terminationPolicies,
+      defaultInstanceWarmup: props.defaultInstanceWarmup?.toSeconds(),
+      capacityRebalance: props.capacityRebalance,
       ...this.getLaunchSettings(launchConfig, props.launchTemplate, props.mixedInstancesPolicy),
     };
 
@@ -1353,6 +1403,8 @@ export class AutoScalingGroup extends AutoScalingGroupBase implements
     if (props.requireImdsv2) {
       Aspects.of(this).add(new AutoScalingGroupRequireImdsv2Aspect());
     }
+
+    this.node.addValidation({ validate: () => this.validateTargetGroup() });
   }
 
   /**
@@ -1380,10 +1432,6 @@ export class AutoScalingGroup extends AutoScalingGroupBase implements
    * Attach to ELBv2 Application Target Group
    */
   public attachToApplicationTargetGroup(targetGroup: elbv2.IApplicationTargetGroup): elbv2.LoadBalancerTargetProps {
-    if (this.albTargetGroup !== undefined) {
-      throw new Error('Cannot add AutoScalingGroup to 2nd Target Group');
-    }
-
     this.targetGroupArns.push(targetGroup.targetGroupArn);
     if (targetGroup instanceof elbv2.ApplicationTargetGroup) {
       // Copy onto self if it's a concrete type. We need this for autoscaling
@@ -1523,7 +1571,7 @@ export class AutoScalingGroup extends AutoScalingGroupBase implements
     if (props.instanceMonitoring) {
       throw new Error('Setting \'instanceMonitoring\' must not be set when \'launchTemplate\' or \'mixedInstancesPolicy\' is set');
     }
-    if (props.associatePublicIpAddress) {
+    if (props.associatePublicIpAddress !== undefined) {
       throw new Error('Setting \'associatePublicIpAddress\' must not be set when \'launchTemplate\' or \'mixedInstancesPolicy\' is set');
     }
     if (props.spotPrice) {
@@ -1729,6 +1777,16 @@ export class AutoScalingGroup extends AutoScalingGroupBase implements
         version: launchTemplate.versionNumber,
       };
     }
+  }
+
+
+  private validateTargetGroup(): string[] {
+    const errors = new Array<string>();
+    if (this.hasCalledScaleOnRequestCount && this.targetGroupArns.length > 1) {
+      errors.push('Cannon use multiple target groups if `scaleOnRequestCount()` is being used.');
+    }
+
+    return errors;
   }
 }
 
@@ -2157,7 +2215,31 @@ function synthesizeBlockDeviceMappings(construct: Construct, blockDevices: Block
     }
 
     if (ebs) {
-      const { iops, volumeType } = ebs;
+      const { iops, volumeType, throughput } = ebs;
+
+      if (throughput) {
+        const throughputRange = { Min: 125, Max: 1000 };
+        const { Min, Max } = throughputRange;
+
+        if (volumeType != EbsDeviceVolumeType.GP3) {
+          throw new Error('throughput property requires volumeType: EbsDeviceVolumeType.GP3');
+        }
+
+        if (throughput < Min || throughput > Max) {
+          throw new Error(
+            `throughput property takes a minimum of ${Min} and a maximum of ${Max}`,
+          );
+        }
+
+        const maximumThroughputRatio = 0.25;
+        if (iops) {
+          const iopsRatio = (throughput / iops);
+          if (iopsRatio > maximumThroughputRatio) {
+            throw new Error(`Throughput (MiBps) to iops ratio of ${iopsRatio} is too high; maximum is ${maximumThroughputRatio} MiBps per iops`);
+          }
+        }
+      }
+
 
       if (!iops) {
         if (volumeType === EbsDeviceVolumeType.IO1) {

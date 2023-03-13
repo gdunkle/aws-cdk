@@ -1,15 +1,17 @@
-/// !cdk-integ pragma:ignore-assets pragma:disable-update-workflow
+/// !cdk-integ pragma:disable-update-workflow
 import * as path from 'path';
 import * as ec2 from '@aws-cdk/aws-ec2';
 import * as iam from '@aws-cdk/aws-iam';
 import * as kms from '@aws-cdk/aws-kms';
 import { Asset } from '@aws-cdk/aws-s3-assets';
 import { App, CfnOutput, Duration, Token, Fn, Stack, StackProps } from '@aws-cdk/core';
+import * as integ from '@aws-cdk/integ-tests';
 import * as cdk8s from 'cdk8s';
-import * as kplus from 'cdk8s-plus-21';
+import * as kplus from 'cdk8s-plus-24';
 import * as constructs from 'constructs';
-import * as eks from '../lib';
 import * as hello from './hello-k8s';
+import { getClusterVersionConfig } from './integ-tests-kubernetes-version';
+import * as eks from '../lib';
 
 
 class EksClusterStack extends Stack {
@@ -30,12 +32,19 @@ class EksClusterStack extends Stack {
     // just need one nat gateway to simplify the test
     this.vpc = new ec2.Vpc(this, 'Vpc', { maxAzs: 3, natGateways: 1 });
 
+    // Changing the subnets order should be supported
+    const vpcSubnets: ec2.SubnetSelection[] = [
+      { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+      { subnetType: ec2.SubnetType.PUBLIC },
+    ];
+
     // create the cluster with a default nodegroup capacity
     this.cluster = new eks.Cluster(this, 'Cluster', {
       vpc: this.vpc,
+      vpcSubnets,
       mastersRole,
       defaultCapacity: 2,
-      version: eks.KubernetesVersion.V1_21,
+      ...getClusterVersionConfig(this),
       secretsEncryptionKey,
       tags: {
         foo: 'bar',
@@ -129,8 +138,6 @@ class EksClusterStack extends Stack {
 
     // make sure namespace is deployed before the chart
     nginxIngress.node.addDependency(nginxNamespace);
-
-
   }
 
   private assertSimpleCdk8sChart() {
@@ -191,7 +198,7 @@ class EksClusterStack extends Stack {
   private assertNodeGroupX86() {
     // add a extra nodegroup
     this.cluster.addNodegroupCapacity('extra-ng', {
-      instanceType: new ec2.InstanceType('t3.small'),
+      instanceTypes: [new ec2.InstanceType('t3.small')],
       minSize: 1,
       // reusing the default capacity nodegroup instance role when available
       nodeRole: this.cluster.defaultCapacity ? this.cluster.defaultCapacity.role : undefined,
@@ -221,7 +228,7 @@ class EksClusterStack extends Stack {
     const lt = new ec2.CfnLaunchTemplate(this, 'LaunchTemplate', {
       launchTemplateData: {
         imageId: new eks.EksOptimizedImage({
-          kubernetesVersion: eks.KubernetesVersion.V1_21.version,
+          kubernetesVersion: eks.KubernetesVersion.V1_25.version,
         }).getImage(this).imageId,
         instanceType: new ec2.InstanceType('t3.small').toString(),
         userData: Fn.base64(userData.render()),
@@ -240,7 +247,7 @@ class EksClusterStack extends Stack {
   private assertNodeGroupArm() {
     // add a extra nodegroup
     this.cluster.addNodegroupCapacity('extra-ng-arm', {
-      instanceType: new ec2.InstanceType('m6g.medium'),
+      instanceTypes: [new ec2.InstanceType('m6g.medium')],
       minSize: 1,
       // reusing the default capacity nodegroup instance role when available
       nodeRole: this.cluster.defaultCapacity ? this.cluster.defaultCapacity.role : undefined,
@@ -249,7 +256,7 @@ class EksClusterStack extends Stack {
   private assertNodeGroupGraviton3() {
     // add a Graviton3 nodegroup
     this.cluster.addNodegroupCapacity('extra-ng-arm3', {
-      instanceType: new ec2.InstanceType('c7g.large'),
+      instanceTypes: [new ec2.InstanceType('c7g.large')],
       minSize: 1,
       // reusing the default capacity nodegroup instance role when available
       nodeRole: this.cluster.defaultCapacity ? this.cluster.defaultCapacity.role : undefined,
@@ -335,5 +342,15 @@ if (process.env.CDK_INTEG_ACCOUNT !== '12345678') {
 
 }
 
+new integ.IntegTest(app, 'aws-cdk-eks-cluster', {
+  testCases: [stack],
+  cdkCommandOptions: {
+    deploy: {
+      args: {
+        rollback: true,
+      },
+    },
+  },
+});
 
 app.synth();

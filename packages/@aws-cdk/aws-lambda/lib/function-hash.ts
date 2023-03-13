@@ -1,10 +1,10 @@
-import * as crypto from 'crypto';
-import { CfnResource, FeatureFlags, Stack } from '@aws-cdk/core';
+import { CfnResource, FeatureFlags, Stack, Token } from '@aws-cdk/core';
+import { md5hash } from '@aws-cdk/core/lib/helpers-internal';
 import { LAMBDA_RECOGNIZE_LAYER_VERSION, LAMBDA_RECOGNIZE_VERSION_PROPS } from '@aws-cdk/cx-api';
 import { Function as LambdaFunction } from './function';
 import { ILayerVersion } from './layers';
 
-export function calculateFunctionHash(fn: LambdaFunction) {
+export function calculateFunctionHash(fn: LambdaFunction, additional: string = '') {
   const stack = Stack.of(fn);
 
   const functionResource = fn.node.defaultChild as CfnResource;
@@ -34,9 +34,7 @@ export function calculateFunctionHash(fn: LambdaFunction) {
     stringifiedConfig = stringifiedConfig + calculateLayersHash(fn._layers);
   }
 
-  const hash = crypto.createHash('md5');
-  hash.update(stringifiedConfig);
-  return hash.digest('hex');
+  return md5hash(stringifiedConfig + additional);
 }
 
 export function trimFromStart(s: string, maxLength: number) {
@@ -76,6 +74,8 @@ export const VERSION_LOCKED: { [key: string]: boolean } = {
   PackageType: true,
   Role: true,
   Runtime: true,
+  RuntimeManagementConfig: true,
+  SnapStart: true,
   Timeout: true,
   TracingConfig: true,
   VpcConfig: true,
@@ -131,7 +131,16 @@ function calculateLayersHash(layers: ILayerVersion[]): string {
     // if there is no layer resource, then the layer was imported
     // and we will include the layer arn and runtimes in the hash
     if (layerResource === undefined) {
-      layerConfig[layer.layerVersionArn] = layer.compatibleRuntimes;
+      // ARN may have unresolved parts in it, but we didn't deal with this previously
+      // so deal with it now for backwards compatibility.
+      if (!Token.isUnresolved(layer.layerVersionArn)) {
+        layerConfig[layer.layerVersionArn] = layer.compatibleRuntimes;
+      } else {
+        layerConfig[layer.node.id] = {
+          arn: stack.resolve(layer.layerVersionArn),
+          runtimes: layer.compatibleRuntimes?.map(r => r.name),
+        };
+      }
       continue;
     }
     const config = stack.resolve((layerResource as any)._toCloudFormation());
@@ -146,7 +155,5 @@ function calculateLayersHash(layers: ILayerVersion[]): string {
     layerConfig[layer.node.id] = properties;
   }
 
-  const hash = crypto.createHash('md5');
-  hash.update(JSON.stringify(layerConfig));
-  return hash.digest('hex');
+  return md5hash(JSON.stringify(layerConfig));
 }

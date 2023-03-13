@@ -51,6 +51,11 @@ export class TarballImageAsset extends Construct implements IAsset {
    */
   public readonly assetHash: string;
 
+  /**
+   * The tag of this asset when it is uploaded to ECR. The tag may differ from the assetHash if a stack synthesizer adds a dockerTagPrefix.
+   */
+  public readonly imageTag: string;
+
   constructor(scope: Construct, id: string, props: TarballImageAssetProps) {
     super(scope, id);
 
@@ -72,12 +77,13 @@ export class TarballImageAsset extends Construct implements IAsset {
       executable: [
         'sh',
         '-c',
-        `docker load -i ${relativePathInOutDir} | sed "s/Loaded image: //g"`,
+        `docker load -i ${relativePathInOutDir} | tail -n 1 | sed "s/Loaded image: //g"`,
       ],
     });
 
     this.repository = ecr.Repository.fromRepositoryName(this, 'Repository', location.repositoryName);
     this.imageUri = location.imageUri;
+    this.imageTag = location.imageTag ?? this.assetHash;
   }
 }
 

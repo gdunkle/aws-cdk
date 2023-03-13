@@ -2,10 +2,13 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as cxapi from '@aws-cdk/cx-api';
 import { Construct } from 'constructs';
+import * as fse from 'fs-extra';
 import { AssetStaging } from '../asset-staging';
 import { FileAssetPackaging } from '../assets';
 import { CfnResource } from '../cfn-resource';
 import { Duration } from '../duration';
+import { FileSystem } from '../fs';
+import { PolicySynthesizer, getPrecreatedRoleConfig } from '../helpers-internal';
 import { Lazy } from '../lazy';
 import { Size } from '../size';
 import { Stack } from '../stack';
@@ -97,9 +100,9 @@ export enum CustomResourceProviderRuntime {
   /**
    * Node.js 12.x
    *
-   * @deprecated Use {@link NODEJS_14_X}
+   * @deprecated Use `NODEJS_14_X`
    */
-  NODEJS_12 = 'nodejs12.x',
+  NODEJS_12 = 'deprecated_nodejs12.x',
 
   /**
    * Node.js 14.x
@@ -118,11 +121,12 @@ export enum CustomResourceProviderRuntime {
  * This is a provider for `CustomResource` constructs, backed by an AWS Lambda
  * Function. It only supports NodeJS runtimes.
  *
- * **This is not a generic custom resource provider class**. It is specifically
- * intended to be used only by constructs in the AWS CDK Construct Library, and
- * only exists here because of reverse dependency issues (for example, it cannot
- * use `iam.PolicyStatement` objects, since the `iam` library already depends on
- * the CDK `core` library and we cannot have cyclic dependencies).
+ * > **Application builders do not need to use this provider type**. This is not
+ * > a generic custom resource provider class. It is specifically
+ * > intended to be used only by constructs in the AWS CDK Construct Library, and
+ * > only exists here because of reverse dependency issues (for example, it cannot
+ * > use `iam.PolicyStatement` objects, since the `iam` library already depends on
+ * > the CDK `core` library and we cannot have cyclic dependencies).
  *
  * If you are not writing constructs for the AWS Construct Library, you should
  * use the `Provider` class in the `custom-resources` module instead, which has
@@ -193,23 +197,31 @@ export class CustomResourceProvider extends Construct {
    */
   public readonly roleArn: string;
 
+  /**
+   * The hash of the lambda code backing this provider. Can be used to trigger updates
+   * on code changes, even when the properties of a custom resource remain unchanged.
+   */
+  public readonly codeHash: string;
+
   private policyStatements?: any[];
+  private _role?: CfnResource;
 
   protected constructor(scope: Construct, id: string, props: CustomResourceProviderProps) {
     super(scope, id);
 
     const stack = Stack.of(scope);
 
-    // copy the entry point to the code directory
-    fs.copyFileSync(ENTRYPOINT_NODEJS_SOURCE, path.join(props.codeDirectory, `${ENTRYPOINT_FILENAME}.js`));
-
     // verify we have an index file there
     if (!fs.existsSync(path.join(props.codeDirectory, 'index.js'))) {
       throw new Error(`cannot find ${props.codeDirectory}/index.js`);
     }
 
+    const stagingDirectory = FileSystem.mkdtemp('cdk-custom-resource');
+    fse.copySync(props.codeDirectory, stagingDirectory, { filter: (src, _dest) => !src.endsWith('.ts') });
+    fs.copyFileSync(ENTRYPOINT_NODEJS_SOURCE, path.join(stagingDirectory, `${ENTRYPOINT_FILENAME}.js`));
+
     const staging = new AssetStaging(this, 'Staging', {
-      sourcePath: props.codeDirectory,
+      sourcePath: stagingDirectory,
     });
 
     const assetFileName = staging.relativeStagedPath(stack);
@@ -226,20 +238,51 @@ export class CustomResourceProvider extends Construct {
       }
     }
 
-    const role = new CfnResource(this, 'Role', {
-      type: 'AWS::IAM::Role',
-      properties: {
-        AssumeRolePolicyDocument: {
-          Version: '2012-10-17',
-          Statement: [{ Action: 'sts:AssumeRole', Effect: 'Allow', Principal: { Service: 'lambda.amazonaws.com' } }],
+    const config = getPrecreatedRoleConfig(this, `${this.node.path}/Role`);
+    const assumeRolePolicyDoc = [{ Action: 'sts:AssumeRole', Effect: 'Allow', Principal: { Service: 'lambda.amazonaws.com' } }];
+    const managedPolicyArn = 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole';
+
+    // need to initialize this attribute, but there should never be an instance
+    // where config.enabled=true && config.preventSynthesis=true
+    this.roleArn = '';
+    if (config.enabled) {
+      // gives policyStatements a chance to resolve
+      this.node.addValidation({
+        validate: () => {
+          PolicySynthesizer.getOrCreate(this).addRole(`${this.node.path}/Role`, {
+            missing: !config.precreatedRoleName,
+            roleName: config.precreatedRoleName ?? id+'Role',
+            managedPolicies: [{ managedPolicyArn: managedPolicyArn }],
+            policyStatements: this.policyStatements ?? [],
+            assumeRolePolicy: assumeRolePolicyDoc as any,
+          });
+          return [];
         },
-        ManagedPolicyArns: [
-          { 'Fn::Sub': 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole' },
-        ],
-        Policies: Lazy.any({ produce: () => this.renderPolicies() }),
-      },
-    });
-    this.roleArn = Token.asString(role.getAtt('Arn'));
+      });
+      this.roleArn = Stack.of(this).formatArn({
+        region: '',
+        service: 'iam',
+        resource: 'role',
+        resourceName: config.precreatedRoleName,
+      });
+    }
+    if (!config.preventSynthesis) {
+      this._role = new CfnResource(this, 'Role', {
+        type: 'AWS::IAM::Role',
+        properties: {
+          AssumeRolePolicyDocument: {
+            Version: '2012-10-17',
+            Statement: assumeRolePolicyDoc,
+          },
+          ManagedPolicyArns: [
+            { 'Fn::Sub': managedPolicyArn },
+          ],
+          Policies: Lazy.any({ produce: () => this.renderPolicies() }),
+        },
+      });
+      this.roleArn = Token.asString(this._role.getAtt('Arn'));
+    }
+
 
     const timeout = props.timeout ?? Duration.minutes(15);
     const memory = props.memorySize ?? Size.mebibytes(128);
@@ -254,14 +297,16 @@ export class CustomResourceProvider extends Construct {
         Timeout: timeout.toSeconds(),
         MemorySize: memory.toMebibytes(),
         Handler: `${ENTRYPOINT_FILENAME}.handler`,
-        Role: role.getAtt('Arn'),
-        Runtime: props.runtime,
+        Role: this.roleArn,
+        Runtime: customResourceProviderRuntimeToString(props.runtime),
         Environment: this.renderEnvironmentVariables(props.environment),
         Description: props.description ?? undefined,
       },
     });
 
-    handler.addDependsOn(role);
+    if (this._role) {
+      handler.addDependency(this._role);
+    }
 
     if (this.node.tryGetContext(cxapi.ASSET_RESOURCE_METADATA_ENABLED_CONTEXT)) {
       handler.addMetadata(cxapi.ASSET_RESOURCE_METADATA_PATH_KEY, assetFileName);
@@ -269,6 +314,7 @@ export class CustomResourceProvider extends Construct {
     }
 
     this.serviceToken = Token.asString(handler.getAtt('Arn'));
+    this.codeHash = staging.assetHash;
   }
 
   /**
@@ -316,6 +362,11 @@ export class CustomResourceProvider extends Construct {
       return undefined;
     }
 
+    env = { ...env }; // Copy
+
+    // Always use regional endpoints
+    env.AWS_STS_REGIONAL_ENDPOINTS = 'regional';
+
     // Sort environment so the hash of the function used to create
     // `currentVersion` is not affected by key order (this is how lambda does
     // it)
@@ -327,5 +378,17 @@ export class CustomResourceProvider extends Construct {
     }
 
     return { Variables: variables };
+  }
+}
+
+function customResourceProviderRuntimeToString(x: CustomResourceProviderRuntime): string {
+  switch (x) {
+    case CustomResourceProviderRuntime.NODEJS_12:
+    case CustomResourceProviderRuntime.NODEJS_12_X:
+      return 'nodejs12.x';
+    case CustomResourceProviderRuntime.NODEJS_14_X:
+      return 'nodejs14.x';
+    case CustomResourceProviderRuntime.NODEJS_16_X:
+      return 'nodejs16.x';
   }
 }

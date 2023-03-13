@@ -44,7 +44,7 @@ export enum WindowsOptimizedVersion {
 /**
  * The properties that define which ECS-optimized AMI is used.
  *
- * @deprecated see {@link EcsOptimizedImage}
+ * @deprecated see `EcsOptimizedImage`
  */
 export interface EcsOptimizedAmiProps {
   /**
@@ -96,7 +96,7 @@ export interface EcsOptimizedAmiProps {
 /**
  * Construct a Linux or Windows machine image from the latest ECS Optimized AMI published in SSM
  *
- * @deprecated see {@link EcsOptimizedImage#amazonLinux}, {@link EcsOptimizedImage#amazonLinux} and {@link EcsOptimizedImage#windows}
+ * @deprecated see `EcsOptimizedImage#amazonLinux`, `EcsOptimizedImage#amazonLinux` and `EcsOptimizedImage#windows`
  */
 export class EcsOptimizedAmi implements ec2.IMachineImage {
   private readonly generation?: ec2.AmazonLinuxGeneration;
@@ -369,5 +369,5 @@ export class BottleRocketImage implements ec2.IMachineImage {
 function lookupImage(scope: Construct, cachedInContext: boolean | undefined, parameterName: string) {
   return cachedInContext
     ? ssm.StringParameter.valueFromLookup(scope, parameterName)
-    : ssm.StringParameter.valueForTypedStringParameter(scope, parameterName, ssm.ParameterType.AWS_EC2_IMAGE_ID);
+    : ssm.StringParameter.valueForTypedStringParameterV2(scope, parameterName, ssm.ParameterValueType.AWS_EC2_IMAGE_ID);
 }

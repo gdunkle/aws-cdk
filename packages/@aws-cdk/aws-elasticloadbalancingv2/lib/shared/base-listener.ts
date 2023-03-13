@@ -1,10 +1,10 @@
 import * as cxschema from '@aws-cdk/cloud-assembly-schema';
-import { Annotations, ContextProvider, Lazy, Resource, Token } from '@aws-cdk/core';
+import { Annotations, ContextProvider, IResource, Lazy, Resource, Token } from '@aws-cdk/core';
 import * as cxapi from '@aws-cdk/cx-api';
 import { Construct } from 'constructs';
-import { CfnListener } from '../elasticloadbalancingv2.generated';
 import { IListenerAction } from './listener-action';
 import { mapTagMapToCxschema } from './util';
+import { CfnListener } from '../elasticloadbalancingv2.generated';
 
 /**
  * Options for listener lookup
@@ -57,9 +57,20 @@ export interface ListenerQueryContextProviderOptions {
 }
 
 /**
+ * Base interface for listeners
+ */
+export interface IListener extends IResource {
+  /**
+   * ARN of the listener
+   * @attribute
+   */
+  readonly listenerArn: string;
+}
+
+/**
  * Base class for listeners
  */
-export abstract class BaseListener extends Resource {
+export abstract class BaseListener extends Resource implements IListener {
   /**
    * Queries the load balancer listener context provider for load balancer
    * listener info.

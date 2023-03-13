@@ -1,7 +1,8 @@
 import * as cloudwatch from '@aws-cdk/aws-cloudwatch';
 import { IVpcEndpoint } from '@aws-cdk/aws-ec2';
 import * as iam from '@aws-cdk/aws-iam';
-import { ArnFormat, CfnOutput, IResource as IResourceBase, Resource, Stack, Token } from '@aws-cdk/core';
+import { ArnFormat, CfnOutput, IResource as IResourceBase, Resource, Stack, Token, FeatureFlags, RemovalPolicy, Size } from '@aws-cdk/core';
+import { APIGATEWAY_DISABLE_CLOUDWATCH_ROLE } from '@aws-cdk/cx-api';
 import { Construct } from 'constructs';
 import { ApiDefinition } from './api-definition';
 import { ApiKey, ApiKeyOptions, IApiKey } from './api-key';
@@ -27,6 +28,12 @@ export interface IRestApi extends IResourceBase {
    * @attribute
    */
   readonly restApiId: string;
+
+  /**
+   * The name of this API Gateway RestApi.
+   * @attribute
+   */
+  readonly restApiName: string;
 
   /**
    * The resource ID of the root resource.
@@ -152,7 +159,7 @@ export interface RestApiBaseProps {
   /**
    * Automatically configure an AWS CloudWatch role for API Gateway.
    *
-   * @default true
+   * @default - false if `@aws-cdk/aws-apigateway:disableCloudWatchRole` is enabled, true otherwise
    */
   readonly cloudWatchRole?: boolean;
 
@@ -180,6 +187,13 @@ export interface RestApiBaseProps {
    * @default false
    */
   readonly disableExecuteApiEndpoint?: boolean;
+
+  /**
+   * A description of the RestApi construct.
+   *
+   * @default - 'Automatically created by the RestApi construct'
+   */
+  readonly description?: string;
 }
 
 /**
@@ -193,12 +207,6 @@ export interface RestApiOptions extends RestApiBaseProps, ResourceOptions {
  * Props to create a new instance of RestApi
  */
 export interface RestApiProps extends RestApiOptions {
-  /**
-   * A description of the purpose of this API Gateway RestApi resource.
-   *
-   * @default - No description.
-   */
-  readonly description?: string;
 
   /**
    * The list of binary media mime-types that are supported by the RestApi
@@ -217,8 +225,21 @@ export interface RestApiProps extends RestApiOptions {
    * payload size.
    *
    * @default - Compression is disabled.
+   * @deprecated - superseded by `minCompressionSize`
    */
   readonly minimumCompressionSize?: number;
+
+  /**
+   * A Size(in bytes, kibibytes, mebibytes etc) that is used to enable compression (with non-negative
+   * between 0 and 10485760 (10M) bytes, inclusive) or disable compression
+   * (when undefined) on an API. When compression is enabled, compression or
+   * decompression is not applied on the payload if the payload size is
+   * smaller than this value. Setting it to zero allows compression for any
+   * payload size.
+   *
+   * @default - Compression is disabled.
+   */
+  readonly minCompressionSize?: Size;
 
   /**
    * The ID of the API Gateway RestApi resource that you want to clone.
@@ -253,6 +274,18 @@ export interface SpecRestApiProps extends RestApiBaseProps {
    * @see https://docs.aws.amazon.com/apigateway/latest/developerguide/api-gateway-import-api.html
    */
   readonly apiDefinition: ApiDefinition;
+
+  /**
+   * A Size(in bytes, kibibytes, mebibytes etc) that is used to enable compression (with non-negative
+   * between 0 and 10485760 (10M) bytes, inclusive) or disable compression
+   * (when undefined) on an API. When compression is enabled, compression or
+   * decompression is not applied on the payload if the payload size is
+   * smaller than this value. Setting it to zero allows compression for any
+   * payload size.
+   *
+   * @default - Compression is disabled.
+   */
+  readonly minCompressionSize?: Size;
 }
 
 /**
@@ -395,11 +428,11 @@ export abstract class RestApiBase extends Resource implements IRestApi {
   }
 
   /**
-   * Add an ApiKey
+   * Add an ApiKey to the deploymentStage
    */
   public addApiKey(id: string, options?: ApiKeyOptions): IApiKey {
     return new ApiKey(this, id, {
-      resources: [this],
+      stages: [this.deploymentStage],
       ...options,
     });
   }
@@ -524,10 +557,12 @@ export abstract class RestApiBase extends Resource implements IRestApi {
       assumedBy: new iam.ServicePrincipal('apigateway.amazonaws.com'),
       managedPolicies: [iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AmazonAPIGatewayPushToCloudWatchLogs')],
     });
+    role.applyRemovalPolicy(RemovalPolicy.RETAIN);
 
     this.cloudWatchAccount = new CfnAccount(this, 'Account', {
       cloudWatchRoleArn: role.roleArn,
     });
+    this.cloudWatchAccount.applyRemovalPolicy(RemovalPolicy.RETAIN);
 
     this.cloudWatchAccount.node.addDependency(apiResource);
   }
@@ -554,7 +589,7 @@ export abstract class RestApiBase extends Resource implements IRestApi {
     if (deploy) {
 
       this._latestDeployment = new Deployment(this, 'Deployment', {
-        description: 'Automatically created by the RestApi construct',
+        description: props.description? props.description :'Automatically created by the RestApi construct',
         api: this,
         retainDeployments: props.retainDeployments,
       });
@@ -606,7 +641,7 @@ export abstract class RestApiBase extends Resource implements IRestApi {
 /**
  * Represents a REST API in Amazon API Gateway, created with an OpenAPI specification.
  *
- * Some properties normally accessible on @see {@link RestApi} - such as the description -
+ * Some properties normally accessible on @see `RestApi` - such as the description -
  * must be declared in the specification. All Resources and Methods need to be defined as
  * part of the OpenAPI specification file, and cannot be added via the CDK.
  *
@@ -638,10 +673,12 @@ export class SpecRestApi extends RestApiBase {
       name: this.restApiName,
       policy: props.policy,
       failOnWarnings: props.failOnWarnings,
+      minimumCompressionSize: props.minCompressionSize?.toBytes(),
       body: apiDefConfig.inlineDefinition ?? undefined,
       bodyS3Location: apiDefConfig.inlineDefinition ? undefined : apiDefConfig.s3Location,
       endpointConfiguration: this._configureEndpoints(props),
       parameters: props.parameters,
+      disableExecuteApiEndpoint: props.disableExecuteApiEndpoint,
     });
 
     props.apiDefinition.bindAfterCreate(this, this);
@@ -651,14 +688,15 @@ export class SpecRestApi extends RestApiBase {
     this.restApiRootResourceId = resource.attrRootResourceId;
     this.root = new RootResource(this, {}, this.restApiRootResourceId);
 
+    const cloudWatchRoleDefault = FeatureFlags.of(this).isEnabled(APIGATEWAY_DISABLE_CLOUDWATCH_ROLE) ? false : true;
+    const cloudWatchRole = props.cloudWatchRole ?? cloudWatchRoleDefault;
+    if (cloudWatchRole) {
+      this._configureCloudWatchRole(resource);
+    }
+
     this._configureDeployment(props);
     if (props.domainName) {
       this.addDomainName('CustomDomain', props.domainName);
-    }
-
-    const cloudWatchRole = props.cloudWatchRole ?? true;
-    if (cloudWatchRole) {
-      this._configureCloudWatchRole(resource);
     }
   }
 }
@@ -671,6 +709,13 @@ export interface RestApiAttributes {
    * The ID of the API Gateway RestApi.
    */
   readonly restApiId: string;
+
+  /**
+   * The name of the API Gateway RestApi.
+   *
+   * @default - ID of the RestApi construct.
+   */
+  readonly restApiName?: string;
 
   /**
    * The resource ID of the root resource.
@@ -712,6 +757,7 @@ export class RestApi extends RestApiBase {
   public static fromRestApiAttributes(scope: Construct, id: string, attrs: RestApiAttributes): IRestApi {
     class Import extends RestApiBase {
       public readonly restApiId = attrs.restApiId;
+      public readonly restApiName = attrs.restApiName ?? id;
       public readonly restApiRootResourceId = attrs.rootResourceId;
       public readonly root: IResource = new RootResource(this, {}, this.restApiRootResourceId);
     }
@@ -738,12 +784,16 @@ export class RestApi extends RestApiBase {
   constructor(scope: Construct, id: string, props: RestApiProps = { }) {
     super(scope, id, props);
 
+    if (props.minCompressionSize !== undefined && props.minimumCompressionSize !== undefined) {
+      throw new Error('both properties minCompressionSize and minimumCompressionSize cannot be set at once.');
+    }
+
     const resource = new CfnRestApi(this, 'Resource', {
       name: this.physicalName,
       description: props.description,
       policy: props.policy,
       failOnWarnings: props.failOnWarnings,
-      minimumCompressionSize: props.minimumCompressionSize,
+      minimumCompressionSize: props.minCompressionSize?.toBytes() ?? props.minimumCompressionSize,
       binaryMediaTypes: props.binaryMediaTypes,
       endpointConfiguration: this._configureEndpoints(props),
       apiKeySourceType: props.apiKeySourceType,
@@ -754,7 +804,8 @@ export class RestApi extends RestApiBase {
     this.node.defaultChild = resource;
     this.restApiId = resource.ref;
 
-    const cloudWatchRole = props.cloudWatchRole ?? true;
+    const cloudWatchRoleDefault = FeatureFlags.of(this).isEnabled(APIGATEWAY_DISABLE_CLOUDWATCH_ROLE) ? false : true;
+    const cloudWatchRole = props.cloudWatchRole ?? cloudWatchRoleDefault;
     if (cloudWatchRole) {
       this._configureCloudWatchRole(resource);
     }

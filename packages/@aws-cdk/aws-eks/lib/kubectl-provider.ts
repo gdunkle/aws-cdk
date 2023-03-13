@@ -149,13 +149,9 @@ export class KubectlProvider extends NestedStack implements IKubectlProvider {
       vpcSubnets: cluster.kubectlPrivateSubnets ? { subnets: cluster.kubectlPrivateSubnets } : undefined,
     });
 
-    // allow user to customize the layer
-    if (!props.cluster.kubectlLayer) {
-      handler.addLayers(new AwsCliLayer(this, 'AwsCliLayer'));
-      handler.addLayers(new KubectlLayer(this, 'KubectlLayer'));
-    } else {
-      handler.addLayers(props.cluster.kubectlLayer);
-    }
+    // allow user to customize the layers with the tools we need
+    handler.addLayers(props.cluster.awscliLayer ?? new AwsCliLayer(this, 'AwsCliLayer'));
+    handler.addLayers(props.cluster.kubectlLayer ?? new KubectlLayer(this, 'KubectlLayer'));
 
     this.handlerRole = handler.role!;
 
@@ -167,6 +163,11 @@ export class KubectlProvider extends NestedStack implements IKubectlProvider {
     // For OCI helm chart authorization.
     this.handlerRole.addManagedPolicy(
       iam.ManagedPolicy.fromAwsManagedPolicyName('AmazonEC2ContainerRegistryReadOnly'),
+    );
+
+    // For OCI helm chart public ECR authorization.
+    this.handlerRole.addManagedPolicy(
+      iam.ManagedPolicy.fromAwsManagedPolicyName('AmazonElasticContainerRegistryPublicReadOnly'),
     );
 
     // allow this handler to assume the kubectl role

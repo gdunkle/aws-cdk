@@ -17,6 +17,7 @@ import * as cxapi from '@aws-cdk/cx-api';
 import * as constructs from 'constructs';
 import * as _ from 'lodash';
 import * as lambda from '../lib';
+import { AdotLambdaLayerJavaSdkVersion } from '../lib/adot-layers';
 import { calculateFunctionHash } from '../lib/function-hash';
 
 describe('function', () => {
@@ -2561,6 +2562,10 @@ describe('function', () => {
           'LambdaSGtoEfsEfsSecurityGroupFCE2954020499719694A',
           'MyFunctionServiceRoleDefaultPolicyB705ABD4',
           'MyFunctionServiceRole3C357FF2',
+          'VpcPrivateSubnet1DefaultRouteBE02A9ED',
+          'VpcPrivateSubnet1RouteTableAssociation70C59FA6',
+          'VpcPrivateSubnet2DefaultRoute060D2087',
+          'VpcPrivateSubnet2RouteTableAssociationA89CAD56',
         ],
       });
     });
@@ -2867,7 +2872,7 @@ describe('function', () => {
 
   describe('FunctionUrl', () => {
     test('addFunctionUrl creates a function url with default options', () => {
-    // GIVEN
+      // GIVEN
       const stack = new cdk.Stack();
       const fn = new lambda.Function(stack, 'MyLambda', {
         code: new lambda.InlineCode('hello()'),
@@ -2891,7 +2896,7 @@ describe('function', () => {
     });
 
     test('addFunctionUrl creates a function url with all options', () => {
-    // GIVEN
+      // GIVEN
       const stack = new cdk.Stack();
       const fn = new lambda.Function(stack, 'MyLambda', {
         code: new lambda.InlineCode('hello()'),
@@ -3041,6 +3046,55 @@ describe('function', () => {
       },
     });
   });
+
+  test('adds ADOT instrumentation to a ZIP Lambda function', () => {
+    // GIVEN
+    const app = new cdk.App();
+    const stack = new cdk.Stack(app, 'Base', {
+      env: { account: '111111111111', region: 'us-west-2' },
+    });
+
+    // WHEN
+    new lambda.Function(stack, 'MyLambda', {
+      code: new lambda.InlineCode('foo'),
+      handler: 'index.handler',
+      runtime: lambda.Runtime.NODEJS_14_X,
+      adotInstrumentation: {
+        layerVersion: lambda.AdotLayerVersion.fromJavaSdkLayerVersion(AdotLambdaLayerJavaSdkVersion.V1_19_0),
+        execWrapper: lambda.AdotLambdaExecWrapper.REGULAR_HANDLER,
+      },
+    });
+
+    // THEN
+    Template.fromStack(stack).hasResourceProperties('AWS::Lambda::Function', {
+      Layers: ['arn:aws:lambda:us-west-2:901920570463:layer:aws-otel-java-wrapper-amd64-ver-1-19-0:1'],
+      Environment: {
+        Variables: {
+          AWS_LAMBDA_EXEC_WRAPPER: '/opt/otel-handler',
+        },
+      },
+    });
+  });
+
+  test('adds ADOT instrumentation to a container image Lambda function', () => {
+    // GIVEN
+    const app = new cdk.App();
+    const stack = new cdk.Stack(app, 'Base', {
+      env: { account: '111111111111', region: 'us-west-2' },
+    });
+
+    // WHEN
+    expect(
+      () =>
+        new lambda.DockerImageFunction(stack, 'MyLambda', {
+          code: lambda.DockerImageCode.fromImageAsset(path.join(__dirname, 'docker-lambda-handler')),
+          adotInstrumentation: {
+            layerVersion: lambda.AdotLayerVersion.fromJavaSdkLayerVersion(AdotLambdaLayerJavaSdkVersion.V1_19_0),
+            execWrapper: lambda.AdotLambdaExecWrapper.REGULAR_HANDLER,
+          },
+        }),
+    ).toThrow(/ADOT Lambda layer can't be configured with container image package type/);
+  });
 });
 
 test('throws if ephemeral storage size is out of bound', () => {
@@ -3106,6 +3160,44 @@ test('FunctionVersionUpgrade adds new description to function', () => {
       Handler: 'bar',
       Runtime: 'nodejs14.x',
       Description: 'my description version-hash:54f18c47346ed84843c2dac547de81fa',
+    },
+  });
+});
+
+test('function using a reserved environment variable', () => {
+  const stack = new cdk.Stack();
+  expect(() => new lambda.Function(stack, 'MyLambda', {
+    code: new lambda.InlineCode('foo'),
+    handler: 'index.handler',
+    runtime: lambda.Runtime.PYTHON_3_9,
+    environment: {
+      AWS_REGION: 'ap-southeast-2',
+    },
+  })).toThrow(/AWS_REGION environment variable is reserved/);
+});
+
+test('set SnapStart to desired value', () => {
+  const stack = new cdk.Stack();
+  new lambda.CfnFunction(stack, 'MyLambda', {
+    code: {
+      zipFile: 'java11-test-function.zip',
+    },
+    functionName: 'MyCDK-SnapStart-Function',
+    handler: 'example.Handler::handleRequest',
+    role: 'testRole',
+    runtime: 'java11',
+    snapStart: { applyOn: 'PublishedVersions' },
+  });
+
+  Template.fromStack(stack).hasResource('AWS::Lambda::Function', {
+    Properties:
+    {
+      Code: { ZipFile: 'java11-test-function.zip' },
+      Handler: 'example.Handler::handleRequest',
+      Runtime: 'java11',
+      SnapStart: {
+        ApplyOn: 'PublishedVersions',
+      },
     },
   });
 });

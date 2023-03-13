@@ -325,6 +325,10 @@ describe('cli notices', () => {
       expect(debugSpy).not.toHaveBeenCalled();
 
       debugSpy.mockRestore();
+
+      if (fs.existsSync('does-not-exist.json')) {
+        fs.unlinkSync('does-not-exist.json');
+      }
     });
 
     test('retrieved data from the delegate when it is configured to ignore the cache', async () => {
@@ -386,7 +390,7 @@ describe('cli notices', () => {
       });
 
       expect(result).toEqual(`
-NOTICES
+NOTICES         (What's this? https://github.com/aws/aws-cdk/wiki/CLI-Notices)
 
 16603	Toggling off auto_delete_objects for Bucket empties the bucket
 

@@ -112,6 +112,10 @@ export class HostedZone extends Resource implements IHostedZone {
    * @see https://docs.aws.amazon.com/cdk/latest/guide/environments.html
    */
   public static fromLookup(scope: Construct, id: string, query: HostedZoneProviderProps): IHostedZone {
+    if (!query.domainName) {
+      throw new Error('Cannot use undefined value for attribute `domainName`');
+    }
+
     const DEFAULT_HOSTED_ZONE: HostedZoneContextResponse = {
       Id: 'DUMMY',
       Name: query.domainName,
@@ -177,7 +181,7 @@ export class HostedZone extends Resource implements IHostedZone {
    * @param vpc the other VPC to add.
    */
   public addVpc(vpc: ec2.IVpc) {
-    this.vpcs.push({ vpcId: vpc.vpcId, vpcRegion: Stack.of(vpc).region });
+    this.vpcs.push({ vpcId: vpc.vpcId, vpcRegion: vpc.env.region ?? Stack.of(vpc).region });
   }
 }
 
@@ -196,7 +200,20 @@ export interface PublicHostedZoneProps extends CommonHostedZoneProps {
   /**
    * A principal which is trusted to assume a role for zone delegation
    *
+   * If supplied, this will create a Role in the same account as the Hosted
+   * Zone, which can be assumed by the `CrossAccountZoneDelegationRecord` to
+   * create a delegation record to a zone in a different account.
+   *
+   * Be sure to indicate the account(s) that you trust to create delegation
+   * records, using either `iam.AccountPrincipal` or `iam.OrganizationPrincipal`.
+   *
+   * If you are planning to use `iam.ServicePrincipal`s here, be sure to include
+   * region-specific service principals for every opt-in region you are going to
+   * be delegating to; or don't use this feature and create separate roles
+   * with appropriate permissions for every opt-in region instead.
+   *
    * @default - No delegation configuration
+   * @deprecated Create the Role yourself and call `hostedZone.grantDelegation()`.
    */
   readonly crossAccountZoneDelegationPrincipal?: iam.IPrincipal;
 
@@ -204,6 +221,7 @@ export interface PublicHostedZoneProps extends CommonHostedZoneProps {
    * The name of the role created for cross account delegation
    *
    * @default - A role name is generated automatically
+   * @deprecated Create the Role yourself and call `hostedZone.grantDelegation()`.
    */
   readonly crossAccountZoneDelegationRoleName?: string;
 }
@@ -250,8 +268,8 @@ export class PublicHostedZone extends HostedZone implements IPublicHostedZone {
    * @param id  the logical name of this Construct
    * @param attrs the PublicHostedZoneAttributes (hosted zone ID and hosted zone name)
    */
-  public static fromPublicHostedZoneAttributes(scope: Construct, id: string, attrs: PublicHostedZoneAttributes): IHostedZone {
-    class Import extends Resource implements IHostedZone {
+  public static fromPublicHostedZoneAttributes(scope: Construct, id: string, attrs: PublicHostedZoneAttributes): IPublicHostedZone {
+    class Import extends Resource implements IPublicHostedZone {
       public readonly hostedZoneId = attrs.hostedZoneId;
       public readonly zoneName = attrs.zoneName;
       public get hostedZoneArn(): string {
@@ -289,6 +307,12 @@ export class PublicHostedZone extends HostedZone implements IPublicHostedZone {
               new iam.PolicyStatement({
                 actions: ['route53:ChangeResourceRecordSets'],
                 resources: [this.hostedZoneArn],
+                conditions: {
+                  'ForAllValues:StringEquals': {
+                    'route53:ChangeResourceRecordSetsRecordTypes': ['NS'],
+                    'route53:ChangeResourceRecordSetsActions': ['UPSERT', 'DELETE'],
+                  },
+                },
               }),
               new iam.PolicyStatement({
                 actions: ['route53:ListHostedZonesByName'],
@@ -319,6 +343,30 @@ export class PublicHostedZone extends HostedZone implements IPublicHostedZone {
       comment: opts.comment,
       ttl: opts.ttl,
     });
+  }
+
+  /**
+   * Grant permissions to add delegation records to this zone
+   */
+  public grantDelegation(grantee: iam.IGrantable) {
+    const g1 = iam.Grant.addToPrincipal({
+      grantee,
+      actions: ['route53:ChangeResourceRecordSets'],
+      resourceArns: [this.hostedZoneArn],
+      conditions: {
+        'ForAllValues:StringEquals': {
+          'route53:ChangeResourceRecordSetsRecordTypes': ['NS'],
+          'route53:ChangeResourceRecordSetsActions': ['UPSERT', 'DELETE'],
+        },
+      },
+    });
+    const g2 = iam.Grant.addToPrincipal({
+      grantee,
+      actions: ['route53:ListHostedZonesByName'],
+      resourceArns: ['*'],
+    });
+
+    return g1.combine(g2);
   }
 }
 

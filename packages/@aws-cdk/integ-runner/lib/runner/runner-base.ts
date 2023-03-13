@@ -1,13 +1,13 @@
 import * as path from 'path';
 import { TestCase, DefaultCdkOptions } from '@aws-cdk/cloud-assembly-schema';
-import { AVAILABILITY_ZONE_FALLBACK_CONTEXT_KEY, FUTURE_FLAGS, TARGET_PARTITIONS, FUTURE_FLAGS_EXPIRED, NEW_STYLE_STACK_SYNTHESIS_CONTEXT } from '@aws-cdk/cx-api';
+import { AVAILABILITY_ZONE_FALLBACK_CONTEXT_KEY, TARGET_PARTITIONS, NEW_PROJECT_CONTEXT } from '@aws-cdk/cx-api';
 import { CdkCliWrapper, ICdk } from 'cdk-cli-wrapper';
 import * as fs from 'fs-extra';
-import { flatten } from '../utils';
-import { DestructiveChange } from '../workers/common';
 import { IntegTestSuite, LegacyIntegTestSuite } from './integ-test-suite';
 import { IntegTest } from './integration-tests';
 import { AssemblyManifestReader, ManifestTrace } from './private/cloud-assembly';
+import { flatten } from '../utils';
+import { DestructiveChange } from '../workers/common';
 
 const DESTRUCTIVE_CHANGES = '!!DESTRUCTIVE_CHANGES:';
 
@@ -33,7 +33,7 @@ export interface IntegRunnerOptions {
    *
    * @default - no additional environment variables
    */
-  readonly env?: { [name: string]: string },
+  readonly env?: { [name: string]: string | undefined },
 
   /**
    * tmp cdk.out directory
@@ -48,6 +48,13 @@ export interface IntegRunnerOptions {
    * @default - CdkCliWrapper
    */
   readonly cdk?: ICdk;
+
+  /**
+   * Show output from running integration tests
+   *
+   * @default false
+   */
+  readonly showOutput?: boolean;
 }
 
 /**
@@ -137,12 +144,16 @@ export abstract class IntegRunner {
 
     this.cdk = options.cdk ?? new CdkCliWrapper({
       directory: this.directory,
+      showOutput: options.showOutput,
       env: {
         ...options.env,
       },
     });
     this.cdkOutDir = options.integOutDir ?? this.test.temporaryOutputDir;
-    this.cdkApp = `node ${path.relative(this.directory, this.test.fileName)}`;
+
+    const testRunCommand = this.test.appCommand;
+    this.cdkApp = testRunCommand.replace('{filePath}', path.relative(this.directory, this.test.fileName));
+
     this.profile = options.profile;
     if (this.hasSnapshot()) {
       this.expectedTestSuite = this.loadManifest();
@@ -180,7 +191,11 @@ export abstract class IntegRunner {
       },
       output: path.relative(this.directory, this.cdkOutDir),
     });
-    return this.loadManifest(this.cdkOutDir);
+    const manifest = this.loadManifest(this.cdkOutDir);
+    // after we load the manifest remove the tmp snapshot
+    // so that it doesn't mess up the real snapshot created later
+    this.cleanup();
+    return manifest;
   }
 
   /**
@@ -204,7 +219,7 @@ export abstract class IntegRunner {
     } catch (e) {
       const testCases = LegacyIntegTestSuite.fromLegacy({
         cdk: this.cdk,
-        testName: this.testName,
+        testName: this.test.normalizedTestName,
         integSourceFilePath: this.test.fileName,
         listOptions: {
           ...this.defaultArgs,
@@ -260,7 +275,7 @@ export abstract class IntegRunner {
     const stacks = this.actualTestSuite.getStacksWithoutUpdateWorkflow() ?? [];
     const manifest = AssemblyManifestReader.fromPath(this.snapshotDir);
     const assets = flatten(stacks.map(stack => {
-      return manifest.getAssetsForStack(stack) ?? [];
+      return manifest.getAssetLocationsForStack(stack) ?? [];
     }));
 
     assets.forEach(asset => {
@@ -313,7 +328,7 @@ export abstract class IntegRunner {
         execCmd: this.cdkApp.split(' '),
         env: {
           ...DEFAULT_SYNTH_OPTIONS.env,
-          CDK_CONTEXT_JSON: JSON.stringify(this.getContext()),
+          CDK_CONTEXT_JSON: JSON.stringify(this.getContext(DEFAULT_SYNTH_OPTIONS.context)),
         },
         output: path.relative(this.directory, this.snapshotDir),
       });
@@ -348,22 +363,22 @@ export abstract class IntegRunner {
   }
 
   protected getContext(additionalContext?: Record<string, any>): Record<string, any> {
-    const futureFlags: { [key: string]: any } = {};
-    Object.entries(FUTURE_FLAGS)
-      .filter(([k, _]) => !FUTURE_FLAGS_EXPIRED.includes(k))
-      .forEach(([k, v]) => futureFlags[k] = v);
-
-    const enableLookups = (this.actualTestSuite ?? this.expectedTestSuite)?.enableLookups;
     return {
-      // if lookups are enabled then we need to synth
-      // with the "dummy" context
-      ...enableLookups ? DEFAULT_SYNTH_OPTIONS.context : {},
-      // This is needed so that there are no differences between
-      // running on v1 vs v2
-      [NEW_STYLE_STACK_SYNTHESIS_CONTEXT]: '',
-      ...futureFlags,
+      ...NEW_PROJECT_CONTEXT,
       ...this.legacyContext,
       ...additionalContext,
+
+      // We originally had PLANNED to set this to ['aws', 'aws-cn'], but due to a programming mistake
+      // it was set to everything. In this PR, set it to everything to not mess up all the snapshots.
+      [TARGET_PARTITIONS]: undefined,
+
+      /* ---------------- THE FUTURE LIVES BELOW----------------------------
+      // Restricting to these target partitions makes most service principals synthesize to
+      // `service.${URL_SUFFIX}`, which is technically *incorrect* (it's only `amazonaws.com`
+      // or `amazonaws.com.cn`, never UrlSuffix for any of the restricted regions) but it's what
+      // most existing integ tests contain, and we want to disturb as few as possible.
+      // [TARGET_PARTITIONS]: ['aws', 'aws-cn'],
+      /* ---------------- END OF THE FUTURE ------------------------------- */
     };
   }
 }
@@ -406,15 +421,13 @@ export const DEFAULT_SYNTH_OPTIONS = {
         },
       ],
     },
-
-    // Restricting to these target partitions makes most service principals synthesize to
-    // `service.${URL_SUFFIX}`, which is technically *incorrect* (it's only `amazonaws.com`
-    // or `amazonaws.com.cn`, never UrlSuffix for any of the restricted regions) but it's what
-    // most existing integ tests contain, and we want to disturb as few as possible.
-    [TARGET_PARTITIONS]: ['aws', 'aws-cn'],
   },
   env: {
     CDK_INTEG_ACCOUNT: '12345678',
     CDK_INTEG_REGION: 'test-region',
+    CDK_INTEG_HOSTED_ZONE_ID: 'Z23ABC4XYZL05B',
+    CDK_INTEG_HOSTED_ZONE_NAME: 'example.com',
+    CDK_INTEG_DOMAIN_NAME: '*.example.com',
+    CDK_INTEG_CERT_ARN: 'arn:aws:acm:test-region:12345678:certificate/86468209-a272-595d-b831-0efb6421265z',
   },
 };

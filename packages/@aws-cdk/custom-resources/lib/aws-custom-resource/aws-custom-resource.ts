@@ -1,9 +1,12 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import * as ec2 from '@aws-cdk/aws-ec2';
 import * as iam from '@aws-cdk/aws-iam';
 import * as lambda from '@aws-cdk/aws-lambda';
 import * as logs from '@aws-cdk/aws-logs';
 import * as cdk from '@aws-cdk/core';
+import { Annotations } from '@aws-cdk/core';
+import * as cxapi from '@aws-cdk/cx-api';
 import { Construct } from 'constructs';
 import { PHYSICAL_RESOURCE_ID_REFERENCE } from './runtime';
 
@@ -83,7 +86,8 @@ export interface AwsSdkCall {
 
   /**
    * The physical resource id of the custom resource for this call.
-   * Mandatory for onCreate or onUpdate calls.
+   * Mandatory for onCreate call.
+   * In onUpdate, you can omit this to passthrough it from request.
    *
    * @default - no physical resource id
    */
@@ -260,10 +264,16 @@ export interface AwsCustomResourceProps {
    * to note the that function's role will eventually accumulate the
    * permissions/grants from all resources.
    *
+   * Note that a policy must be specified if `role` is not provided, as
+   * by default a new role is created which requires policy changes to access
+   * resources.
+   *
+   * @default - no policy added
+   *
    * @see Policy.fromStatements
    * @see Policy.fromSdkCalls
    */
-  readonly policy: AwsCustomResourcePolicy;
+  readonly policy?: AwsCustomResourcePolicy;
 
   /**
    * The execution role for the singleton Lambda function implementing this custom
@@ -291,12 +301,18 @@ export interface AwsCustomResourceProps {
   readonly logRetention?: logs.RetentionDays;
 
   /**
-   * Whether to install the latest AWS SDK v2. Allows to use the latest API
-   * calls documented at https://docs.aws.amazon.com/AWSJavaScriptSDK/latest/index.html.
+   * Whether to install the latest AWS SDK v2.
    *
-   * The installation takes around 60 seconds.
+   * If not specified, this uses whatever JavaScript SDK version is the default in
+   * AWS Lambda at the time of execution.
    *
-   * @default true
+   * Otherwise, installs the latest version from 'npmjs.com'. The installation takes
+   * around 60 seconds and requires internet connectivity.
+   *
+   * The default can be controlled using the context key
+   * `@aws-cdk/customresources:installLatestAwsSdkDefault` is.
+   *
+   * @default - The value of `@aws-cdk/customresources:installLatestAwsSdkDefault`, otherwise `true`
    */
   readonly installLatestAwsSdk?: boolean;
 
@@ -308,6 +324,23 @@ export interface AwsCustomResourceProps {
    * ID for the function's name. For more information, see Name Type.
    */
   readonly functionName?: string;
+
+  /**
+   * The vpc to provision the lambda function in.
+   *
+   * @default - the function is not provisioned inside a vpc.
+   */
+  readonly vpc?: ec2.IVpc;
+
+  /**
+   * Which subnets from the VPC to place the lambda function in.
+   *
+   * Only used if 'vpc' is supplied. Note: internet access for Lambdas
+   * requires a NAT gateway, so picking Public subnets is not allowed.
+   *
+   * @default - the Vpc default strategy if not specified
+   */
+  readonly vpcSubnets?: ec2.SubnetSelection;
 }
 
 /**
@@ -319,6 +352,10 @@ export interface AwsCustomResourceProps {
  *
  */
 export class AwsCustomResource extends Construct implements iam.IGrantable {
+  /**
+   * The uuid of the custom resource provider singleton lambda function.
+   */
+  public static readonly PROVIDER_FUNCTION_UUID = '679f53fa-c002-430c-b0da-5b7982bd2287';
 
   private static breakIgnoreErrorsCircuit(sdkCalls: Array<AwsSdkCall | undefined>, caller: string) {
 
@@ -344,10 +381,16 @@ export class AwsCustomResource extends Construct implements iam.IGrantable {
       throw new Error('At least `onCreate`, `onUpdate` or `onDelete` must be specified.');
     }
 
-    for (const call of [props.onCreate, props.onUpdate]) {
-      if (call && !call.physicalResourceId) {
-        throw new Error('`physicalResourceId` must be specified for onCreate and onUpdate calls.');
-      }
+    if (!props.role && !props.policy) {
+      throw new Error('At least one of `policy` or `role` (or both) must be specified.');
+    }
+
+    if (props.onCreate && !props.onCreate.physicalResourceId) {
+      throw new Error("'physicalResourceId' must be specified for 'onCreate' call.");
+    }
+
+    if (!props.onCreate && props.onUpdate && !props.onUpdate.physicalResourceId) {
+      throw new Error("'physicalResourceId' must be specified for 'onUpdate' call when 'onCreate' is omitted.");
     }
 
     for (const call of [props.onCreate, props.onUpdate, props.onDelete]) {
@@ -368,46 +411,30 @@ export class AwsCustomResource extends Construct implements iam.IGrantable {
       }),
       runtime: lambda.Runtime.NODEJS_14_X,
       handler: 'index.handler',
-      uuid: '679f53fa-c002-430c-b0da-5b7982bd2287',
+      uuid: AwsCustomResource.PROVIDER_FUNCTION_UUID,
       lambdaPurpose: 'AWS',
       timeout: props.timeout || cdk.Duration.minutes(2),
       role: props.role,
       logRetention: props.logRetention,
       functionName: props.functionName,
+      vpc: props.vpc,
+      vpcSubnets: props.vpcSubnets,
     });
     this.grantPrincipal = provider.grantPrincipal;
 
-    // Create the policy statements for the custom resource function role, or use the user-provided ones
-    const statements = [];
-    if (props.policy.statements.length !== 0) {
-      // Use custom statements provided by the user
-      for (const statement of props.policy.statements) {
-        statements.push(statement);
-      }
-    } else {
-      // Derive statements from AWS SDK calls
-      for (const call of [props.onCreate, props.onUpdate, props.onDelete]) {
-        if (call && call.assumedRoleArn == null) {
-          const statement = new iam.PolicyStatement({
-            actions: [awsSdkToIamAction(call.service, call.action)],
-            resources: props.policy.resources,
-          });
-          statements.push(statement);
-        } else if (call && call.assumedRoleArn != null) {
-          const statement = new iam.PolicyStatement({
-            actions: ['sts:AssumeRole'],
-            resources: [call.assumedRoleArn],
-          });
-          statements.push(statement);
-        }
-      }
+    const installLatestAwsSdk = (props.installLatestAwsSdk
+      ?? this.node.tryGetContext(cxapi.AWS_CUSTOM_RESOURCE_LATEST_SDK_DEFAULT)
+      ?? true);
+
+    if (installLatestAwsSdk && props.installLatestAwsSdk === undefined) {
+      // This is dangerous. Add a warning.
+      Annotations.of(this).addWarning([
+        'installLatestAwsSdk was not specified, and defaults to true. You probably do not want this.',
+        `Set the global context flag \'${cxapi.AWS_CUSTOM_RESOURCE_LATEST_SDK_DEFAULT}\' to false to switch this behavior off project-wide,`,
+        'or set the property explicitly to true if you know you need to call APIs that are not in Lambda\'s built-in SDK version.',
+      ].join(' '));
     }
-    const policy = new iam.Policy(this, 'CustomResourcePolicy', {
-      statements: statements,
-    });
-    if (provider.role !== undefined) {
-      policy.attachToRole(provider.role);
-    }
+
     const create = props.onCreate || props.onUpdate;
     this.customResource = new cdk.CustomResource(this, 'Resource', {
       resourceType: props.resourceType || 'Custom::AWS',
@@ -417,13 +444,47 @@ export class AwsCustomResource extends Construct implements iam.IGrantable {
         create: create && this.encodeJson(create),
         update: props.onUpdate && this.encodeJson(props.onUpdate),
         delete: props.onDelete && this.encodeJson(props.onDelete),
-        installLatestAwsSdk: props.installLatestAwsSdk ?? true,
+        installLatestAwsSdk,
       },
     });
 
-    // If the policy was deleted first, then the function might lose permissions to delete the custom resource
-    // This is here so that the policy doesn't get removed before onDelete is called
-    this.customResource.node.addDependency(policy);
+    // Create the policy statements for the custom resource function role, or use the user-provided ones
+    if (props.policy) {
+      const statements = [];
+      if (props.policy.statements.length !== 0) {
+        // Use custom statements provided by the user
+        for (const statement of props.policy.statements) {
+          statements.push(statement);
+        }
+      } else {
+        // Derive statements from AWS SDK calls
+        for (const call of [props.onCreate, props.onUpdate, props.onDelete]) {
+          if (call && call.assumedRoleArn == null) {
+            const statement = new iam.PolicyStatement({
+              actions: [awsSdkToIamAction(call.service, call.action)],
+              resources: props.policy.resources,
+            });
+            statements.push(statement);
+          } else if (call && call.assumedRoleArn != null) {
+            const statement = new iam.PolicyStatement({
+              actions: ['sts:AssumeRole'],
+              resources: [call.assumedRoleArn],
+            });
+            statements.push(statement);
+          }
+        }
+      }
+      const policy = new iam.Policy(this, 'CustomResourcePolicy', {
+        statements: statements,
+      });
+      if (provider.role !== undefined) {
+        policy.attachToRole(provider.role);
+      }
+
+      // If the policy was deleted first, then the function might lose permissions to delete the custom resource
+      // This is here so that the policy doesn't get removed before onDelete is called
+      this.customResource.node.addDependency(policy);
+    }
   }
 
   /**
